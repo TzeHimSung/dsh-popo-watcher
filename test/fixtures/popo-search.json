@@ -1,0 +1,84 @@
+{
+  "ok": true,
+  "code": "FABRIC_OK",
+  "data": {
+    "code": "FABRIC_OK",
+    "data": {
+      "code": "FABRIC_OK",
+      "hint": "Forwarded. Downstream returned HTTP 200. Result is in 'data'.",
+      "action": "default",
+      "tool": null,
+      "message": "操作成功",
+      "data": {
+        "status": 1,
+        "message": "成功",
+        "data": {
+          "uid": "demo-user@example.com",
+          "sid": "DEMO-SID",
+          "t_when": 1789992704913,
+          "page": 0,
+          "has_more": true,
+          "result_list": [
+            {
+              "srid": "DEMO-SRID-1",
+              "msg_id": "1234567-0000000001",
+              "msg_type": "1",
+              "t_msg": 1789991459992,
+              "nfrom": "demo-user@example.com",
+              "nto": "1234567",
+              "session_id": "DEMO-SESSION",
+              "sessionType": 3,
+              "content": "示例消息 1",
+              "empType": 0,
+              "pic": "",
+              "state": 0,
+              "teamState": -1,
+              "sessionName": "示例群",
+              "memberName": "张三",
+              "msgToken": "DEMO-TOKEN"
+            },
+            {
+              "srid": "DEMO-SRID-2",
+              "msg_id": "1234567-0000000002",
+              "msg_type": "1",
+              "t_msg": 1789990677750,
+              "nfrom": "demo-user@example.com",
+              "nto": "1234567",
+              "session_id": "DEMO-SESSION",
+              "sessionType": 3,
+              "content": "示例消息 2",
+              "empType": 0,
+              "pic": "",
+              "state": 0,
+              "teamState": -1,
+              "sessionName": "示例群",
+              "memberName": "李四",
+              "msgToken": "DEMO-TOKEN"
+            },
+            {
+              "srid": "DEMO-SRID-3",
+              "msg_id": "1234567-0000000003",
+              "msg_type": "1",
+              "t_msg": 1789990634324,
+              "nfrom": "demo-user@example.com",
+              "nto": "1234567",
+              "session_id": "DEMO-SESSION",
+              "sessionType": 3,
+              "content": "示例消息 3",
+              "empType": 0,
+              "pic": "",
+              "state": 0,
+              "teamState": -1,
+              "sessionName": "示例群",
+              "memberName": "王五",
+              "msgToken": "DEMO-TOKEN"
+            }
+          ]
+        }
+      },
+      "trace_id": "SYNTHETIC-TRACE-ID",
+      "downstream_http_status": 200
+    }
+  },
+  "request_id": "DEMO-REQUEST"
+}

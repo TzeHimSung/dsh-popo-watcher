@@ -1,0 +1,35 @@
+node_modules/
+*.log
+
+# Credentials and local runtime data
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+secret.json
+credentials.json
+.dsh/
+.fabric/
+popo-watcher/
+*.jsonl
+state.json
+poller.json
+poller-state.json
+
+# Local diagnostics and historical acceptance evidence
+/probe*.mjs
+/docs/ui-repair/
+/docs/ui-refresh/
+/docs/ui-diagnostics/
+/docs/model-selection/
+/docs/refactor/
+
+# Build/test output and editor files
+*.tgz
+coverage/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

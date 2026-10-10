@@ -1,0 +1,23 @@
+# Bundle 补丁：把本插件的 loader 行插入 profile 的层栈。
+#
+# DSH bundle 约定：
+# - `name` 必须是 npm 包名，Loader 才能从 profile 目录解析并 import 本包；
+# - `id` 是 loader 行的 id，后续 patch 层按 id 覆盖该行的整个 config；
+# - 同一 id 只能插入一次，否则 cordis:include 拒绝启动。
+#
+# 本包清单声明了 dsh.bundle.patch，因此 `dsh plugin --profile <name> add` 会
+# 自动把包名追加进 profile 的 dsh.profile.bundles；也可以手写下面这段到
+# profile 的 cordis.patch.yml（该文件是 live 重载的，bundles 列表不是）。
+- insert:
+    - id: dsh-popo-watcher
+      name: 'dsh-popo-watcher'
+      # 行 config 原样传给 apply(ctx, config)，本插件只读 greeting。
+      # 无 Config schema 时不做校验，非法值由插件自身兜底。
+      # config:
+      #   greeting: hello
+
+# DSH 0.2.0-rc.2 的 Connection RPC 内部会访问 webServer；缺少这个声明时，
+# Cordis 在提供者上下文中拒绝访问，路由未挂载，设置页的 POST 最终返回 405。
+# 保留 Web profile 原有的 webRuntime 依赖；非 Web profile 没有此行时不插入。
+- id: connection
+  inject: [webRuntime, webServer]

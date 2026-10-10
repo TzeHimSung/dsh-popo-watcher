@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>POPO 插件实际组件验收 · 模拟 RPC</title>
+  <link rel="stylesheet" href="/theme.css">
+  <style>
+    *{box-sizing:border-box}body{margin:0;padding:16px;font:14px/22px Arial,"Microsoft YaHei",sans-serif;background:var(--dsw-alias-bg-layer-1,#f2f3f5);color:var(--dsw-alias-label-primary,#222)}
+    .qa-toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:0 0 16px}.qa-toolbar label{display:flex;gap:6px;align-items:center}.qa-toolbar select,.qa-toolbar button{font:inherit;padding:3px 8px}
+    .qa-window{display:flex;width:800px;height:800px;max-height:calc(100vh - 100px);margin:auto;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:var(--dsw-elevation-prominent);border-radius:var(--dsw-radius-panel,24px);overflow:hidden}
+    .qa-nav{flex:none;width:188px;padding:22px 12px}.qa-nav h1{font-size:16px;font-weight:500;margin:0 12px 18px}.qa-nav button{display:flex;gap:8px;align-items:center;width:100%;min-height:40px;margin:4px 0;padding:9px 12px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left}.qa-nav button.selected{background:var(--dsw-specific-sidebar-nav-item-active,#e9edf4)}
+    .qa-content{flex:1;min-width:0;display:flex;flex-direction:column}.qa-header{height:54px;flex:none;padding:12px 16px;display:flex;justify-content:flex-end;gap:14px;align-items:center;font-size:12px}.qa-options{min-height:0;flex:1;padding:0 24px 24px;overflow-y:auto}
+    .qa-footer{margin:12px auto;max-width:1100px;font-size:12px;line-height:18px;overflow-wrap:anywhere}.qa-footer pre{white-space:pre-wrap}
+  </style>
+</head>
+<body>
+  <div class="qa-toolbar" aria-label="验收环境">
+    <strong>实际插件 · 模拟 RPC</strong>
+    <label>内容宽度<select id="qa-width"><option value="564">564px</option><option value="360">360px</option></select></label>
+    <label>内容高度<select id="qa-height"><option value="600">600px</option><option value="460">460px</option><option value="1000">1000px（展开详情）</option></select></label>
+    <label>主题<select id="qa-theme"><option value="light">浅色</option><option value="dark">深色</option></select></label>
+    <label>缩放<select id="qa-zoom"><option value="1">100%</option><option value="1.25">125%</option><option value="1.5">150%</option></select></label>
+    <label>场景<select id="qa-scenario"><option value="default">首次配置</option><option value="saved">已保存 / 未开始</option><option value="running">监控中</option><option value="muted">已静音</option><option value="stopped">已停止</option><option value="expired">已到期</option><option value="degraded">采集异常</option><option value="retrying">采集重试中</option><option value="retry-stopped">连续失败 5 次</option><option value="historical-error">重启后的历史故障</option><option value="diagnostics">诊断卡片 / CLI 正常但采集异常</option><option value="diagnostics-long">诊断卡片 / 长字段与长结果</option><option value="long-error">采集长错误 / 大计数</option><option value="long-group">长群号</option><option value="missing-group">目标群未就绪</option><option value="read-error">配置读取失败 / 长错误</option><option value="write-error">配置写盘失败</option><option value="persistence-error">已发送 / 记账失败</option><option value="offline">状态断线</option><option value="stale">断线缓存</option><option value="slow">慢状态请求</option><option value="models-long">长模型名称</option><option value="models-error">模型目录错误</option><option value="models-empty">空模型目录</option><option value="models-slow">慢模型目录</option></select></label>
+    <button id="qa-apply" type="button">切换场景</button>
+  </div>
+  <div class="qa-window" role="dialog" aria-label="设置">
+    <nav class="qa-nav" aria-label="设置导航"><h1>设置</h1><button type="button">账号与余额</button><button type="button">通用设置</button><button type="button">模型</button><button type="button">内置插件</button><button type="button">Agent 预设</button><button type="button" class="selected"><span>POPO自动水群</span></button></nav>
+    <main class="qa-content"><div class="qa-header"><span>宿主设置框</span><span aria-hidden="true">×</span></div><div class="qa-options"><div id="plugin-root"></div></div></main>
+  </div>
+  <div class="qa-footer"><span id="qa-result" role="status">正在加载实际组件…</span><details><summary>模拟请求记录</summary><pre id="qa-calls"></pre></details></div>
+  <script type="module">
+    import '/host/qa-seeds.js'
+    import { defaultConfig, applyPatch } from '/config.js'
+    const params = new URLSearchParams(location.search)
+    const scenario = params.get('scenario') || 'default'
+    for (const key of ['width', 'height', 'theme', 'zoom', 'scenario']) {
+      const element = document.getElementById(`qa-${key}`)
+      if (params.has(key)) element.value = params.get(key)
+    }
+    function appearance() {
+      const width = Number(document.getElementById('qa-width').value)
+      const theme = document.getElementById('qa-theme').value
+      document.documentElement.dataset.theme = theme
+      document.documentElement.style.colorScheme = theme
+      document.body.toggleAttribute('data-ds-dark-theme', theme === 'dark')
+      document.querySelector('.qa-window').style.width = `${width + 236}px`
+      // 高度表示可放内容的区域，另加宿主顶部 54px 与底部 padding 24px。
+      document.querySelector('.qa-window').style.height = `${Number(document.getElementById('qa-height').value) + 78}px`
+      const zoom = Number(document.getElementById('qa-zoom').value)
+      document.querySelector('.qa-window').style.zoom = String(zoom)
+      document.querySelector('.qa-window').style.maxWidth = `calc((100vw - 48px) / ${zoom})`
+      document.querySelector('.qa-window').style.maxHeight = `calc((100vh - 100px) / ${zoom})`
+    }
+    for (const key of ['width', 'height', 'theme', 'zoom']) document.getElementById(`qa-${key}`).addEventListener('change', appearance)
+    document.getElementById('qa-apply').addEventListener('click', () => {
+      const next = new URL(location.href)
+      for (const key of ['width', 'height', 'theme', 'zoom', 'scenario']) next.searchParams.set(key, document.getElementById(`qa-${key}`).value)
+      location.href = next.href
+    })
+    appearance()
+    let config = { ...defaultConfig(), group: '1234567' }
+    if (scenario === 'long-group') config.group = '12345678901234567890'
+    config.judge.model = 'custom-preserved-model'
+    config.judge.timeoutMs = 12345
+    config.judge.thresholds.roundFiller = 0.97
+    const diagnostics = ['diagnostics', 'diagnostics-long'].includes(scenario)
+    if (diagnostics) {
+      config.intervalSec = 20
+      config.judge.model = 'jev-latest'
+      config.dryRun = false
+      config.llm = { ...config.llm, provider: 'example-provider', model: 'deepseek-flash' }
+    }
+    const defaultSelection = { provider: 'example-provider', model: 'deepseek-v4-pro' }
+    const providers = [
+      { id: 'example-provider', name: 'Example Provider', models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }] },
+      { id: 'second-provider', name: '另一个提供方', models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }] },
+    ]
+    if (['models-long', 'diagnostics-long'].includes(scenario)) {
+      const id = 'preview-model-' + 'long-model-name-'.repeat(8)
+      providers[1].models.push({ id, name: '用于验收长名称的生成模型' })
+      config.llm = { ...config.llm, provider: 'second-provider', model: id }
+    }
+    let configState = scenario === 'default' ? 'default' : scenario === 'read-error' ? 'error' : 'saved'
+    let keyStored = false
+    let mode = ['running', 'muted', 'stopped', 'expired', 'degraded', 'retrying', 'retry-stopped', 'historical-error'].includes(scenario) ? scenario : ['long-error', 'stale'].includes(scenario) ? 'running' : 'idle'
+    if (diagnostics) mode = 'degraded'
+    if (scenario === 'persistence-error') mode = 'stopped'
+    let sentCount = scenario === 'long-error' ? 123456789 : scenario === 'historical-error' ? 13 : 10
+    let statusReads = 0
+    const calls = []
+    const longError = 'EACCES: permission denied, open C:/example/.dsh/popo-watcher/' + 'very-long-directory-name/'.repeat(12) + 'config.json'
+    const networkError = 'popo-cli 返回失败：FABRIC_NETWORK_ERROR：ECONNRESET（exit=0）'
+    const nextRetryAt = Date.now() + 80_000
+    function status() {
+      const retrying = mode === 'retrying'
+      const retryStopped = mode === 'retry-stopped'
+      const historical = mode === 'historical-error'
+      const running = ['running', 'muted', 'degraded', 'retrying'].includes(mode)
+      const stopped = ['muted', 'stopped', 'retry-stopped', 'historical-error'].includes(mode)
+      const active = ['running', 'muted', 'degraded', 'stopped', 'retrying', 'retry-stopped', 'historical-error'].includes(mode)
+      return {
+        phase: mode === 'degraded' || retrying || retryStopped ? 'degraded' : active && !stopped ? 'running' : 'idle',
+        group: config.group, configState,
+        persistence: scenario === 'persistence-error' ? { ok: false, error: '模拟记账失败，自动监控已暂停' } : { ok: true, error: null },
+        window: { active, stopped, stoppedAt: historical ? '2026-10-09 23:11:49' : null, collectionError: retryStopped || historical ? networkError : null, startedAt: mode === 'idle' ? null : '2026-10-08 10:00:00', endsAt: mode === 'idle' ? null : '2026-10-08 14:00:00', remainingSec: mode === 'expired' ? -60 : active ? 7200 : null },
+        poll: { running, recovering: retrying, failureLimit: 5, nextRetryAt: retrying ? nextRetryAt : null, intervalSec: config.intervalSec, lagSec: diagnostics ? 40544 : running ? 1 : null, updatedAt: historical ? '2026-10-09 23:11:24' : mode === 'idle' ? null : '2026-10-08 21:29:42', watchedMsgs: diagnostics ? 53 : mode === 'idle' ? null : 32, consecutiveFailures: retrying ? 2 : retryStopped ? 5 : ['long-error', 'diagnostics-long'].includes(scenario) ? 2 : 0, lastError: retrying || retryStopped ? networkError : ['long-error', 'diagnostics-long'].includes(scenario) ? longError : null },
+        selfUid: mode === 'idle' ? '' : diagnostics ? 'preview-account@corp.example.com' : 'preview-account',
+        sends: { count: sentCount, lastSendAt: diagnostics ? '2026-10-09 21:54:17' : null, lastSendContent: diagnostics ? '模拟历史消息：用于检查卡片布局，不会发送。' : null },
+        judge: config.judge, llm: { ...config.llm, resolved: config.llm.provider && config.llm.model
+          ? { provider: config.llm.provider, model: config.llm.model, source: 'plugin' }
+          : { ...defaultSelection, source: 'host' } }, dryRun: config.dryRun,
+        transport: { ok: true }, degraded: { active: mode === 'degraded', reason: diagnostics ? 'popo-cli 返回失败：FABRIC_NETWORK_ERROR（exit=0）' : mode === 'degraded' ? '模拟采集超时' : null },
+        warnings: configState === 'error' ? [longError] : [], errors: [],
+      }
+    }
+    const connection = { rpc: { async call(channel, endpoint, input) {
+      if (channel !== '/popo-watcher') throw new Error('Unexpected channel')
+      calls.push({ endpoint, input: endpoint.startsWith('key.') ? '[redacted]' : input })
+      document.getElementById('qa-calls').textContent = JSON.stringify(calls.slice(-20), null, 2)
+      document.getElementById('qa-result').textContent = `实际 lib/client.js · React ${seeds.react.version} · 模拟请求 ${calls.length} 次 · 无真实采集、发言或凭证读写`
+      if (endpoint === 'status' && scenario === 'slow') await new Promise(resolve => setTimeout(resolve, 3500))
+      if (diagnostics && ['cli.check', 'judge.now'].includes(endpoint)) await new Promise(resolve => setTimeout(resolve, 1800))
+      if (endpoint === 'status' && ['offline', 'missing-group'].includes(scenario)) return { ok: false, error: { message: '模拟连接断开' } }
+      if (endpoint === 'status' && scenario === 'stale' && statusReads++ > 0) return { ok: false, error: { message: '模拟状态断线；以下数据来自上一份快照' } }
+      if (endpoint === 'status') return { ok: true, value: status() }
+      if (endpoint === 'cli.check') return { ok: true, value: { healthy: diagnostics || mode !== 'degraded', message: mode === 'degraded' && !diagnostics
+        ? 'POPO CLI 未登录或登录已失效（FABRIC_NOT_AUTHENTICATED）。请在终端运行 popo-cli auth login，完成浏览器登录后重新检查。'
+        : 'POPO CLI 可正常启动，登录状态正常（preview-account）。采集结果请查看“最近采集”。' } }
+      if (endpoint === 'config.get') {
+        if (scenario === 'missing-group') return { ok: false, error: { message: '模拟配置暂不可用' } }
+        if (input.reload) configState = 'saved'
+        return { ok: true, value: { config: structuredClone(config), configState, warnings: configState === 'error' ? [longError] : [] } }
+      }
+      if (endpoint === 'models.list') {
+        if (scenario === 'models-slow') await new Promise(resolve => setTimeout(resolve, 1800))
+        const judge = scenario === 'models-error' ? { ok: false, models: [], error: 'TypeSafe 凭证无效或无权限（HTTP 401）' }
+          : { ok: true, models: scenario === 'models-empty' ? [] : [{ id: 'jev-latest', name: 'jev-latest' }, { id: 'jev-preview', name: 'jev-preview' }] }
+        const llm = { ok: true, defaultSelection, providers: scenario === 'models-empty' ? [] : [
+          ...providers,
+          ...(scenario === 'models-error' ? [{ id: 'failed-provider', name: '目录异常的提供方', models: [], error: '模型目录读取超时' }] : []),
+        ] }
+        return { ok: true, value: input.scope === 'judge' ? { judge } : { llm, judge } }
+      }
+      if (endpoint === 'config.set') {
+        config = applyPatch(config, input.patch).config
+        configState = scenario === 'write-error' ? 'unsaved' : 'saved'
+        return { ok: true, value: { config: structuredClone(config), configState, written: configState === 'saved', warnings: configState === 'unsaved' ? [longError] : [] } }
+      }
+      if (endpoint === 'start') { mode = 'running'; return { ok: true, value: { window: { endsAt: '2026-10-09 12:00:00' }, polling: true, opening: config.opening.enabled ? { ok: false, reason: '演示模式不发送开场白' } : null } } }
+      if (endpoint === 'stop') { mode = input.mode === 'mute' ? 'muted' : 'stopped'; return { ok: true, value: { mode: input.mode, stoppedAt: '2026-10-08 12:00:00' } } }
+      if (endpoint === 'key.status') return { ok: true, value: { configured: true, source: keyStored ? 'file' : 'env', stored: keyStored } }
+      if (endpoint === 'key.set') { keyStored = true; return { ok: true, value: { configured: true, source: 'file' } } }
+      if (endpoint === 'key.clear') { keyStored = false; return { ok: true, value: { configured: true, source: 'env', stored: false } } }
+      if (endpoint === 'messages') return { ok: true, value: { rows: [
+        { t_msg: 1791603459048, time: '2026-10-10 11:37:39', name: '示例成员', content: '最新群消息显示在第一行。', msgId: 'preview-latest' },
+        { t_msg: 1791542053496, time: '2026-10-09 18:34:13', name: '示例成员', content: '较早的消息显示在后面。', msgId: 'preview-older' },
+      ], limit: 30, group: config.group, fetchedAt: new Date().toLocaleString('sv-SE') } }
+      if (endpoint === 'sends') return { ok: true, value: { rows: [] } }
+      if (endpoint === 'log') return { ok: true, value: { lines: ['模拟日志：无真实调用。'] } }
+      if (endpoint === 'send.now') { sentCount += 1; return { ok: true, value: { msgId: `preview-${sentCount}`, dryRun: false, warnings: [], stateWritten: scenario !== 'persistence-error' } } }
+      if (endpoint === 'judge.now') return { ok: true, value: { mode: 'round', view: { verdict: 'blocked', blockers: ['preview'], nextStep: scenario === 'diagnostics-long' ? '模拟判读说明，不调用判读服务。'.repeat(25) : '模拟环境不调用判读服务。' } } }
+      if (endpoint === 'importLegacy') return { ok: true, value: { from: input.from, imported: {}, skipped: { state: '模拟环境不读取文件' } } }
+      return { ok: false, error: { message: `Unexpected endpoint ${endpoint}` } }
+    } } }
+    const seeds = globalThis.__POPO_QA_SEEDS__
+    const dispose = []
+    window.__ModuleLoader__ = { load({ id, factory }) {
+      if (id !== 'dsh-popo-watcher') throw new Error('Unexpected plugin')
+      const plugin = factory(name => { if (!(name in seeds)) throw new Error(`Unknown seed ${name}`); return seeds[name] })
+      plugin.apply({
+        get: name => name === 'connection' ? connection : undefined,
+        effect: fn => dispose.push(fn()),
+        slots: {
+          inject: (name, fn) => fn(),
+          register: (meta, Page) => {
+            const root = seeds['react-dom/client'].createRoot(document.getElementById('plugin-root'))
+            root.render(seeds.react.createElement(Page, {}))
+            dispose.push(() => root.unmount())
+          },
+        },
+      })
+    } }
+    const bundle = document.createElement('script')
+    bundle.src = '/plugin.js'
+    document.head.append(bundle)
+    window.addEventListener('pagehide', () => dispose.reverse().forEach(fn => fn?.()), { once: true })
+  </script>
+</body>
+</html>

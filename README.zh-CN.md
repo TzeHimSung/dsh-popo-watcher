@@ -1,0 +1,154 @@
+# dsh-popo-watcher
+
+[English](README.md) | 简体中文
+
+[DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的 POPO 群聊插件：监控一个已配置的群，判断是否适合接话，调用宿主模型生成简短回复，再通过官方 POPO CLI 发送。设置页提供监控控制、参数配置、手动发言和活动记录。
+
+插件面向 **DSH 0.2.x**，当前设置界面为中文。
+
+## 插件作用
+
+- 在 **设置 → POPO自动水群** 中开始或停止监控窗口。新安装不会自动启动，需要先配置目标群。
+- 使用 TypeSafe 判读会话与草稿，由 DSH 模型生成回复。两类模型可独立选择，生成模型也可跟随宿主默认设置。
+- 配置提示词、开场白、监控时长、轮询间隔、回复长度、安静时段、每小时上限和自动发送演练。
+- 查看最近群消息，以及本地发送、判读和轮次记录。
+- 向已保存的目标群手动发送原文，监控停止时也可使用。
+- 采集遇到暂时性故障时退避重试，连续失败五次后停止；认证失败、CLI 缺失、无效响应和持久化错误立即停止。
+- 从明确指定的目录导入旧版 watcher 历史数据，导入不会开启监控。
+
+```text
+新消息 → 时间与内容检查 → TypeSafe 判读
+       → 宿主模型生成草稿 → 最终检查 → POPO 发送 → 本地记账
+```
+
+判读不可用时，默认保持安静。**手动发言始终真实发送**，即使自动发送开启演练也一样。手动发言不受自动间隔和判读限制，但要求有效的已保存群号、非空正文，并防止同一次请求重复提交。POPO 发送统一携带 `source=AGENT`。
+
+## 项目依赖
+
+| 依赖 | 用途 |
+| --- | --- |
+| DSH **0.2.x** | 提供运行时、模型服务、RPC 和界面。兼容基准为 Desktop **0.2.0-rc.2**；`@deepseek-ai/dsh-tools` 的 peer 范围为 `^0.2.0-rc.2`，不包含 0.1 和 0.3。 |
+| `@deepseek-ai/cordis` **^4.0.2** | 由 DSH 提供的插件框架。 |
+| 官方 POPO CLI（`@popo/cli`） | 完成认证、群消息搜索与发送。按所在组织提供的 CLI 安装方式获取，并使用能访问目标群的账号登录。 |
+| [TypeSafe](https://typesafe.ai/) API key | 会话和草稿判读；默认模型为 `jev-latest`。 |
+| 已配置的 DSH 语言模型 | 生成自动回复，模型提供方凭证由宿主管理。 |
+| Git | 克隆仓库并安装本地插件。 |
+| Node.js **24+**、npm、esbuild **0.28.2** | 用于开发、重建客户端与测试；esbuild 仅为开发依赖。 |
+
+插件本身没有第三方运行时依赖：宿主代码使用 Node.js 内置模块，客户端复用 DSH 提供的 React。仓库已包含生成的 `lib/client.js`，安装未经修改的源码副本不需要构建客户端。不要为了满足可选 peer 声明，在插件目录中另装一套宿主包。
+
+Windows Desktop 是运行时回归目标。Linux 使用 DSH web profile，并显式设置 POPO CLI 入口；Desktop 测试入口未验证 Linux 宿主。
+
+## 安装方法
+
+先安装兼容的 DSH 宿主与官方 POPO CLI，再在终端完成认证：
+
+```sh
+popo-cli auth login
+popo-cli auth status
+```
+
+### Windows：DSH Desktop
+
+在 PowerShell 中执行，将 Desktop 路径替换为实际安装目录：
+
+```powershell
+git clone https://github.com/TzeHimSung/dsh-popo-watcher.git
+cd dsh-popo-watcher
+
+$dshCli = 'C:\path\to\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
+& $dshCli --version
+& $dshCli plugin --profile desktop add (Get-Location).Path
+```
+
+重新启动 DSH Desktop，进入 **设置 → POPO自动水群**。使用 Desktop 自带的 CLI，使安装目标与其 `desktop` profile 和运行时一致。
+
+### Linux：DSH web profile
+
+已安装兼容的 `dsh` 命令后执行：
+
+```sh
+git clone https://github.com/TzeHimSung/dsh-popo-watcher.git
+cd dsh-popo-watcher
+dsh --version
+dsh plugin --profile web add "$PWD"
+dsh web
+```
+
+若 web 宿主已经运行，安装后重新启动。本地安装会将源码目录链接到目标 profile，因此需要保留该目录。命令遵循 DSH 官方的[插件安装流程](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)。
+
+## 首次配置
+
+1. 打开插件的 **设置** 页签，填写目标 POPO 群 ID 并保存。默认配置不内置真实群号。
+2. 在 DSH 中配置生成模型；插件可选择指定模型，也可保持 **跟随宿主默认**。
+3. 在 **判读凭证** 中填写 TypeSafe key，或为宿主进程设置 `TYPESAFE_API_KEY`。Windows 下也支持用户环境变量；界面保存的本地 key 优先。
+4. 使用 **检查 POPO CLI** 验证 CLI 与登录状态。这项检查不会启动监控或发送消息。
+5. 检查开场白和自动发送参数，选择监控时长，再打开监控。自动发送演练默认 **关闭**，开场白默认启用。
+
+Linux 或自定义 CLI 安装路径需要在插件 `config.json` 中，将 `popoCliJs` 设为 `@popo/cli/bin/popo.js` 的绝对路径，保留其他字段，然后重新读取配置或重启宿主。`npm root -g` 可查看全局模块目录。目前自动发现只检查 Windows npm 安装布局。
+
+## 数据与凭证
+
+运行数据保存在仓库外的 `<用户主目录>/.dsh/popo-watcher/`：
+
+```text
+config.json                  # 已保存配置
+secret.json                  # 仅在界面保存 key 时生成
+<群 ID>/
+  state.json / poller.json    # 窗口、发送记账与采集状态
+  messages.jsonl             # 采集消息
+  sends.jsonl / judge.jsonl / round.jsonl / poll.log
+```
+
+本地 key 以 JSON 值保存，没有加密；界面只显示来源，不回显内容。清除本地 key 不会删除环境变量。运行对应功能时，会话上下文和草稿会发送给 TypeSafe 与已配置的模型。日志同时限制条目数和字节数。
+
+仓库使用虚构测试身份和合成样本；凭据、运行数据、原始截图、本机验收日志及临时探针已排除在 Git 提交范围之外。已停止窗口不会自行恢复；启用 `autoResume` 时，尚未过期的活动窗口可以在宿主重启后恢复。
+
+## 更新与卸载
+
+链接安装的源码副本执行 `git pull --ff-only` 后，重新启动 DSH 并打开设置页。修改客户端源码后，需要先重新构建。
+
+```powershell
+# Windows Desktop，使用前文定义的 $dshCli
+& $dshCli plugin --profile desktop remove dsh-popo-watcher
+```
+
+```sh
+# DSH web profile
+dsh plugin --profile web remove dsh-popo-watcher
+```
+
+卸载插件包不会删除单独保存的配置和历史数据。
+
+## 开发与验证
+
+```sh
+npm ci
+npm run build:client       # src/client/index.js → lib/client.js
+npm run check:client       # 校验已提交的产物与源码一致
+npm run dev:client         # 监听源码并重新构建
+npm test                  # 离线测试；跳过仅能在宿主运行的用例
+```
+
+在已安装 DSH Desktop 的 Windows 上：
+
+```powershell
+npm run test:desktop -- 'C:\path\to\DeepSeek Harness'
+node tools/preview-ui.mjs 'C:\path\to\DeepSeek Harness'
+```
+
+Desktop 测试使用内置 Node 和真实宿主库运行完整用例，数据放在临时目录，外部服务使用桩。预览加载实际客户端和宿主主题，RPC 全部模拟。两者都不需要读取真实 POPO 消息或调用模型。`npm pack` 会在打包前重新构建客户端。
+
+| 目录 | 内容 |
+| --- | --- |
+| `lib/` | 宿主模块及生成的客户端文件 |
+| `src/client/` | 客户端源码和样式 |
+| `test/` | 离线测试及合成样本 |
+| `tools/` | 构建、测试、预览及可选的真实环境诊断 |
+| [`docs/interfaces.md`](docs/interfaces.md) | 详细行为与接口契约 |
+
+真实环境诊断必须显式传入 `--group`，回放还需 `--legacy`。这些工具可能读取真实 POPO 消息或调用 TypeSafe，与离线测试入口分开。
+
+## 许可证
+
+[GNU GPL 第 3 版](LICENSE)（`GPL-3.0-only`）。
