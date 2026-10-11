@@ -1306,7 +1306,6 @@ test('手动发送不依赖窗口、采集身份、传输快照或演练设置',
     const { harness } = await mountPage(t, connection)
     byField(harness.tree(), 'manual-text').props.onChange({ target: { value: '  原样手动正文  ' } })
     assert.equal(byAction(harness.tree(), '发送').props.disabled, false)
-    assertTreeHas(harness.tree(), '目标群 1234567')
     assertTreeHas(harness.tree(), '不受自动规则或演练模式影响')
     byAction(harness.tree(), '发送').props.onClick()
     await harness.flush()
@@ -1328,7 +1327,6 @@ test('手动发送使用生效目标，未保存的群草稿和无效自动参�
   byField(harness.tree(), 'group').props.onChange({ target: { value: '1234568' } })
   byField(harness.tree(), 'hardMaxChars').props.onChange({ target: { value: '' } })
   byField(harness.tree(), 'manual-text').props.onChange({ target: { value: '保持原目标' } })
-  assertTreeHas(harness.tree(), '目标群 1234567')
   assert.equal(byAction(harness.tree(), '发送').props.disabled, false)
   byAction(harness.tree(), '发送').props.onClick()
   await harness.flush()
@@ -1336,27 +1334,42 @@ test('手动发送使用生效目标，未保存的群草稿和无效自动参�
   byField(harness.tree(), 'hardMaxChars').props.onChange({ target: { value: '120' } })
   byAction(harness.tree(), '保存').props.onClick()
   await harness.flush()
-  assertTreeHas(harness.tree(), '目标群 1234568')
+  byField(harness.tree(), 'manual-text').props.onChange({ target: { value: '使用已保存的新目标' } })
+  byAction(harness.tree(), '发送').props.onClick()
+  await harness.flush()
+  assert.deepEqual(destinations, ['1234567', '1234568'])
 })
 
-test('唯一页面群标识为手动输入与发送提供无障碍描述，读取失败时回落到生效配置或未就绪', async (t) => {
-  for (const available of [true, false]) {
+test('各页签仅保留标题，无目标群提示或悬空描述，手动发送仍校验生效群', async (t) => {
+  for (const [group, statusReady, configReady] of [
+    ['1234567', true, true],
+    ['', true, true],
+    ['1234567', false, true],
+    ['', false, false],
+  ]) {
     const connection = routedConnection({
-      status: { ok: false, error: { message: '状态暂不可用' } },
-      'config.get': available
-        ? { ok: true, value: { config: defaultConfig(), configState: 'saved' } }
+      status: statusReady
+        ? { ok: true, value: { ...IDLE, group } }
+        : { ok: false, error: { message: '状态暂不可用' } },
+      'config.get': configReady
+        ? { ok: true, value: { config: { ...defaultConfig(), group }, configState: 'saved' } }
         : { ok: false, error: { message: '配置暂不可用' } },
     })
     const { harness } = await mountPage(t, connection)
-    const targets = findNodes(harness.tree(), node => node.props?.id === 'popo-target-group')
-    assert.equal(targets.length, 1)
-    assert.deepEqual(targets[0].props.children, [available ? '目标群 1234567' : '目标群未就绪'])
-    assert.equal(byField(harness.tree(), 'manual-text').props['aria-describedby'], targets[0].props.id)
-    assert.equal(byAction(harness.tree(), '发送').props['aria-describedby'], targets[0].props.id)
-    byField(harness.tree(), 'manual-text').props.onChange({ target: { value: '保留目标提示' } })
-    assert.equal(byAction(harness.tree(), '发送').props.disabled, !available)
+    for (const tab of ['overview', 'settings', 'records']) {
+      byTab(harness.tree(), tab).props.onClick()
+      await harness.flush()
+      const header = findNodes(harness.tree(), node => node.props?.className?.includes('dsh-popo-page-head'))[0]
+      assert.equal(header.props.children.length, 1)
+      assertTreeHas(header, LABEL)
+      assert.equal(findNodes(harness.tree(), node => node.props?.id === 'popo-target-group'
+        || node.props?.['aria-describedby']?.split(' ').includes('popo-target-group')).length, 0)
+    }
+    byField(harness.tree(), 'manual-text').props.onChange({ target: { value: '校验生效目标' } })
+    assert.equal(byAction(harness.tree(), '发送').props.disabled, !group)
     const manual = findNodes(harness.tree(), node => node.props?.['aria-label'] === '手动发言')[0]
-    assert.equal(JSON.stringify(manual).includes('1234567'), false, '手动区不再重复绘制群号')
+    assertTreeHas(manual, '消息内容')
+    assert.equal(JSON.stringify(manual).includes('1234567'), false, '手动区不绘制群号')
     assert.equal(connection.calls.some(([, endpoint]) => endpoint === 'send.now'), false)
   }
 })

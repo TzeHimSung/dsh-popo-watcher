@@ -333,7 +333,6 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
         h('textarea', {
           className: 'dsh-popo-input dsh-popo-manual-text',
           'data-field': 'manual-text',
-          'aria-describedby': 'popo-target-group',
           rows: 3,
           placeholder: '输入要发送的内容…',
           value: text,
@@ -347,7 +346,6 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
           className: 'dsh-popo-btn',
           type: 'button',
           'data-action': '发送',
-          'aria-describedby': 'popo-target-group',
           'data-primary': true,
           disabled: busy === true || text.trim() === '' || Boolean(blocked),
           onClick: () => { void send() },

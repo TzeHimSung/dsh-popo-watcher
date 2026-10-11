@@ -63,7 +63,6 @@ export function createUi(React) {
     return h('div', { className: 'dsh-popo-root' }, [
       h('div', { className: 'dsh-popo-head dsh-popo-page-head', key: 'head' }, [
         h('h2', { className: 'dsh-popo-heading' }, SECTION_LABEL),
-        h('span', { className: 'dsh-popo-note', id: 'popo-target-group' }, group ? `目标群 ${group}` : '目标群未就绪'),
       ]),
       h('div', { className: 'dsh-popo-tabs', role: 'tablist', 'aria-label': 'POPO 插件页面', key: 'tabs' }, tabs.map(([id, label], index) => h('button', {
         className: 'dsh-popo-tab', type: 'button', role: 'tab', id: `popo-tab-${id}`, key: id,
