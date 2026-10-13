@@ -15,6 +15,7 @@ const CSS = `
   .dsh-popo-card{display:flex;flex-direction:column;gap:12px}
   .dsh-popo-monitor{display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--popo-line);border-radius:12px;background:var(--popo-panel);box-shadow:var(--popo-shadow)}
   .dsh-popo-monitor-heading{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+  .dsh-popo-mention-control{display:grid;gap:8px;padding-top:12px;border-top:1px solid var(--popo-line)}
   .dsh-popo-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:18px;padding:2px 8px;border-radius:6px;--popo-tone:var(--popo-muted);background:color-mix(in srgb,var(--popo-tone) 8%,var(--popo-surface));color:var(--popo-text);overflow-wrap:anywhere}
   .dsh-popo-badge::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--popo-tone)}
   .dsh-popo-root [data-tone="ok"]{--popo-tone:var(--popo-success)}

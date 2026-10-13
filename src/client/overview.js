@@ -128,6 +128,11 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
     const [note, setNote] = React.useState(null)
     const life = useLifetime(connection)
     const focusAfterAction = React.useRef(null)
+    const mentionSettings = props.settings
+    const mentionChecked = mentionSettings.baseline?.replyOnlyWhenMentioned === true
+    const mentionBusy = mentionSettings.busy
+    const mentionDisabled = mentionSettings.phase !== 'ready' || mentionBusy || props.snapshot.value?.phase === 'disposed'
+    const rememberMentionFocus = useActionFocus(mentionBusy, connection)
     const hours = hoursOverride ?? (props.defaultHours == null ? '' : String(props.defaultHours))
     const snapshot = props.snapshot
     const win = snapshot.value?.window ?? {}
@@ -231,6 +236,33 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
           }, h('span', { className: 'dsh-popo-switch-thumb', 'aria-hidden': true })),
           h('span', { className: 'dsh-popo-sr', id: 'popo-monitor-state' }, `${switchState}。停止会同时停止采集和自动发言。`),
         ]),
+      ]),
+      h('div', { className: 'dsh-popo-mention-control', key: 'mentions' }, [
+        h('div', { className: 'dsh-popo-head', key: 'head' }, [
+          h('span', { className: 'dsh-popo-k', id: 'popo-mention-label' }, '只回复 @ 我的消息'),
+          h('button', {
+            className: 'dsh-popo-switch', type: 'button', role: 'switch',
+            'aria-label': '只回复 @ 我的消息', 'aria-checked': mentionChecked, 'aria-busy': mentionBusy,
+            'aria-describedby': 'popo-mention-hint', 'data-action': '切换仅回复@我',
+            disabled: mentionDisabled,
+            onClick: event => {
+              if (mentionDisabled) return
+              rememberMentionFocus(event)
+              void props.onMentionChange(!mentionChecked)
+            },
+          }, h('span', { className: 'dsh-popo-switch-thumb', 'aria-hidden': true })),
+        ]),
+        h('p', { className: 'dsh-popo-note', id: 'popo-mention-hint', key: 'hint' }, mentionBusy ? '正在保存回复范围…'
+          : '仅直接 @ 我时考虑自动回复；单独 @所有人不触发。开场白和手动发送不受影响。'),
+        mentionSettings.note?.scope === 'mentions' && (mentionSettings.note.tone === 'bad' || mentionSettings.configState !== 'saved') ? noteLine(mentionSettings.note) : null,
+        mentionSettings.configState === 'unsaved' ? h('button', {
+          className: 'dsh-popo-btn', type: 'button', 'data-action': '重试保存回复范围', disabled: mentionDisabled,
+          onClick: event => {
+            if (mentionDisabled) return
+            rememberMentionFocus(event)
+            void props.onMentionChange(mentionChecked)
+          },
+        }, '重试保存') : null,
       ]),
       h('div', { className: 'dsh-popo-duration', key: 'duration' }, [
         h('label', { className: 'dsh-popo-hours', key: 'hours' }, [

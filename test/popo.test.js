@@ -299,6 +299,44 @@ test('search 的 argv 形状：不经 shell、sessionList 走 @file、pageSize �
   assert.deepEqual(callA.stdoutReads, [0])
 })
 
+test('@ 搜索保持限群，成员数组经临时文件传递并验证时间参数', async (t) => {
+  let membersFile
+  const spawn = fakeSpawn({ stdout: SEARCH_OK, onSpec: spec => {
+    const memberArg = spec.argv.find(arg => arg.startsWith('atMembers='))
+    membersFile = memberArg.slice('atMembers=@file:'.length)
+    assert.deepEqual(JSON.parse(readFileSync(membersFile, 'utf8')), ['self@example.com'])
+    const sessionArg = spec.argv.find(arg => arg.startsWith('sessionList='))
+    assert.deepEqual(JSON.parse(readFileSync(sessionArg.slice('sessionList=@file:'.length), 'utf8')), ['1234567'])
+    assert.ok(spec.argv.includes('timeStart=1000'))
+    assert.ok(spec.argv.includes('timeEnd=2000'))
+  } })
+  const { transport } = makeTransport(t, 'mention-search', spawn)
+  assert.equal((await transport.search({ group: '1234567', atMembers: ['self@example.com'], timeStart: 1000, timeEnd: 2000 })).ok, true)
+  assert.equal(existsSync(membersFile), false)
+  for (const filter of [{ atMembers: [] }, { atMembers: 'self' }, { atMembers: [''] }, { timeStart: NaN }, { timeEnd: -1 }, { timeStart: 2000, timeEnd: 1000 }]) {
+    assert.equal((await transport.search({ group: '1234567', ...filter })).ok, false)
+  }
+  assert.equal(spawn.calls.length, 1)
+})
+
+test('currentUser 只返回 UID 和去重显示名，缺失身份时失败', async (t) => {
+  for (const [payload, expected] of [
+    [{ uid: 'self@example.com', name: ' 张三 ', nickname: '昵称', token: 'must-not-return' }, { uid: 'self@example.com', names: ['张三', '昵称'] }],
+    [{ uid: 'self@example.com', name: '张三', nickname: '张三' }, { uid: 'self@example.com', names: ['张三'] }],
+    [{ uid: 'self@example.com', name: '' }, null], [{ name: '张三' }, null],
+  ]) {
+    const body = JSON.parse(SEARCH_OK)
+    body.data.data.data.data = payload
+    const spawn = fakeSpawn({ stdout: JSON.stringify(body) })
+    const { transport } = makeTransport(t, 'current-user', spawn)
+    const result = await transport.currentUser()
+    assert.deepEqual(spawn.calls[0].spec.argv, [NODE_PATH, CLI_JS, 'popo', 'team_current_user_info'])
+    assert.equal(result.ok, expected !== null)
+    if (expected) assert.deepEqual(result.value, expected)
+    assert.equal(JSON.stringify(result).includes('must-not-return'), false)
+  }
+})
+
 test('stderr 里的 Node 警告不影响解析（只看 stdout）', async (t) => {
   const noisyStderr = [
     '(node:33724) [DEP0040] DeprecationWarning: The `punycode` module is deprecated.',

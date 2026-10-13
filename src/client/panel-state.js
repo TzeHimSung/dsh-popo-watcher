@@ -146,33 +146,36 @@ export function createPanelState(React, { useLifetime }) {
       })
     }
 
-    async function saveConfig() {
+    async function saveConfig(mentionValue) {
       const token = life.current
-      if (!token?.active || saving.current || !canSave) return
+      const mentionOnly = typeof mentionValue === 'boolean'
+      if (!token?.active || saving.current || (mentionOnly ? settings.phase !== 'ready' || settings.busy : !canSave)) return
       saving.current = true
       setSettings(previous => ({ ...previous, busy: true, note: null }))
-      const result = await callRpc(connection, 'config.set', { patch })
+      const result = await callRpc(connection, 'config.set', { patch: mentionOnly ? { replyOnlyWhenMentioned: mentionValue } : patch })
       if (!token.active) return
       saving.current = false
       const value = result.value ?? {}
-      if (!result.ok || !value.config || typeof value.config !== 'object' || Array.isArray(value.config)) {
-        setSettings(previous => ({ ...previous, busy: false, note: { tone: 'bad', text: `保存失败：${result.ok ? '宿主未返回有效配置' : result.text}` } }))
+      if (!result.ok || !value.config || typeof value.config !== 'object' || Array.isArray(value.config)
+        || (mentionOnly && typeof value.config.replyOnlyWhenMentioned !== 'boolean')) {
+        setSettings(previous => ({ ...previous, busy: false, note: { scope: mentionOnly ? 'mentions' : 'settings', tone: 'bad', text: `保存失败：${result.ok ? '宿主未返回有效配置' : result.text}` } }))
         return
       }
       const written = value.written
       setSettings(previous => ({
         ...previous,
         baseline: value.config,
-        draft: written === true ? draftOf(value.config) : previous.draft,
+        draft: !mentionOnly && written === true ? draftOf(value.config) : previous.draft,
         configState: written === true ? 'saved' : written === false ? 'unsaved' : undefined,
         warnings: Array.isArray(value.warnings) ? value.warnings : [],
         busy: false,
         note: {
+          scope: mentionOnly ? 'mentions' : 'settings',
           tone: written === true ? (value.warnings?.length ? 'warn' : 'ok') : 'warn',
           text: written === true ? '配置已保存' : written === false ? '仅临时生效，尚未保存。请重试保存。' : '宿主未确认持久化状态，请重新保存确认。',
         },
       }))
-      setSnapshot(previous => previous.value ? { ...previous, value: { ...previous.value, group: value.config.group } } : previous)
+      setSnapshot(previous => previous.value ? { ...previous, value: { ...previous.value, group: value.config.group, replyOnlyWhenMentioned: value.config.replyOnlyWhenMentioned === true } } : previous)
       refresh.current()
     }
 

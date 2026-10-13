@@ -147,6 +147,101 @@ function pollingClock() {
 
 const networkFailure = { ok: false, kind: 'upstream', code: 'FABRIC_NETWORK_ERROR', retryable: true, error: 'FABRIC_NETWORK_ERROR: ECONNRESET' }
 
+test('只回复 @ 我：组合识别、混合 @、历史命中及失败均按本轮目标决定', async (t) => {
+  const cases = [
+    { name: '直接 @ 姓名', content: '@测试用户 请解释连接池？', speak: true },
+    { name: '混合 @', content: '@所有人 @测试用户 请解释连接池？', speak: true },
+    { name: '昵称含正则字符', content: '@小测(一) 请解释？', speak: true },
+    { name: '只 @所有人', content: '@所有人 请解释？' },
+    { name: '@别人', content: '@其他用户 请解释？' },
+    { name: '同名前缀', content: '@测试用户甲 请解释？' },
+    { name: '正文手打但无官方命中', content: '@测试用户 请解释？', hits: [] },
+    { name: '只有历史命中', content: '这是新的普通消息', hits: [{ msgId: 'old-at' }] },
+    { name: '搜索失败', searchError: true },
+    { name: '搜索异常', searchThrow: true },
+    { name: '搜索账号变化', searchUid: 'another-account' },
+    { name: '身份读取失败', identity: { ok: false, error: 'offline' } },
+    { name: '身份账号变化', identity: { ok: true, value: { uid: 'other', names: ['测试用户'] } } },
+    { name: '显示名缺失', identity: { ok: true, value: { uid: 'u-self', names: [] } } },
+    { name: '未知自身账号', selfUid: '' },
+    { name: '关闭开关沿用原逻辑', enabled: false, content: '普通新消息', speak: true },
+  ]
+  for (const item of cases) await t.test(item.name, async (t) => {
+    const fresh = { t_msg: 2000, msgId: 'new-at', from: 'u-peer', name: '同事', content: item.content ?? '@测试用户 请解释？' }
+    const store = openWindow({ selfUid: item.selfUid ?? 'u-self' })
+    store.jsonl.set(`${DIR}/messages.jsonl`, [{ ...fresh, t_msg: 1000, msgId: 'old-at', content: '@测试用户 旧问题？' }, fresh])
+    const transport = transportStub()
+    const calls = []
+    let identityCalls = 0
+    transport.search = async params => {
+      calls.push(params)
+      if (item.searchThrow) throw new Error('offline')
+      return item.searchError ? { ok: false, error: 'offline' }
+        : { ok: true, value: { uid: item.searchUid ?? 'u-self', messages: item.hits ?? [fresh] } }
+    }
+    transport.currentUser = async () => {
+      identityCalls += 1
+      return item.identity ?? { ok: true, value: { uid: 'u-self', names: ['测试用户', '小测(一)'] } }
+    }
+    const judge = judgeStub()
+    const draft = draftStub()
+    const watcher = makeWatcher({ store, transport, judge, draft, config: { replyOnlyWhenMentioned: item.enabled !== false } })
+    t.after(() => watcher.dispose())
+    const beforeMessages = JSON.stringify(store.jsonl.get(`${DIR}/messages.jsonl`))
+    const result = await watcher.runRound([fresh])
+    assert.equal(result.verdict, item.speak ? 'sent' : 'quiet')
+    assert.equal(judge.rounds.length, item.speak ? 1 : 0)
+    assert.equal(draft.calls.length, item.speak ? 1 : 0)
+    assert.equal(transport.sends.length, item.speak ? 1 : 0)
+    assert.equal(JSON.stringify(store.jsonl.get(`${DIR}/messages.jsonl`)), beforeMessages)
+    assert.equal(store.json.has(`${DIR}/poller.json`), false, '额外识别查询不写采集水位')
+    if (item.enabled === false || item.selfUid === '') {
+      assert.equal(calls.length, 0)
+      assert.equal(identityCalls, 0)
+    } else assert.deepEqual(calls, [{ group: GROUP, pageSize: 50, atMembers: ['u-self'], timeStart: 1000, timeEnd: 3000 }])
+    if (!item.speak) assert.ok(store.jsonl.get(`${DIR}/round.jsonl`).at(-1).reason)
+  })
+})
+
+test('@ 目标在最新上下文之外仍被保留；判读、生成及草稿审核只以它为回复目标', async (t) => {
+  const target = { t_msg: 1000, msgId: 'target', from: 'u-peer', name: '提问者', content: '@测试用户 连接池要怎么配置？' }
+  const context = Array.from({ length: 20 }, (_, i) => ({ t_msg: 2000 + i, msgId: `other-${i}`, from: 'u-peer', name: '其他同事', content: `其他话题${i}` }))
+  const store = openWindow()
+  store.jsonl.set(`${DIR}/messages.jsonl`, context)
+  const transport = transportStub()
+  transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [target] } })
+  transport.currentUser = async () => ({ ok: true, value: { uid: 'u-self', names: ['测试用户'] } })
+  const judge = judgeStub()
+  let draftState
+  judge.runDraft = async state => { draftState = state; return { ok: true, answers: {} } }
+  const draft = draftStub()
+  const watcher = makeWatcher({ store, transport, judge, draft, config: { replyOnlyWhenMentioned: true } })
+  t.after(() => watcher.dispose())
+  assert.equal((await watcher.runRound([target, context.at(-1)])).verdict, 'sent')
+  for (const state of [judge.rounds[0], draftState]) {
+    assert.deepEqual(state.conversation.filter(row => row.is_new).map(row => row.text), [target.content])
+    assert.equal(state.chat.our_account_display_name, '测试用户')
+    assert.ok(state.conversation.some(row => row.text === '其他话题19'))
+  }
+  assert.match(draft.calls[0].prompt, /本轮只回复/)
+  assert.match(draft.calls[0].prompt, /\[新\] 提问者：@测试用户/)
+  assert.doesNotMatch(draft.calls[0].prompt, /\[新\] 其他同事/)
+})
+
+test('普通自动发送不能绕过 @ 目标确认，开场白与手动发送继续豁免', async (t) => {
+  const store = openWindow()
+  const transport = transportStub()
+  const watcher = makeWatcher({ store, transport, config: { replyOnlyWhenMentioned: true } })
+  t.after(() => watcher.dispose())
+  const blocked = await watcher.sendNow({ text: '普通自动草稿', replyTargets: [{ msgId: 'forged' }] })
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.reason, 'not mentioned')
+  assert.equal(transport.sends.length, 0)
+  assert.equal((await watcher.sendNow({ text: '开场白', opening: true })).ok, true)
+  assert.equal((await watcher.sendNow({ text: '手动发送', manual: true })).ok, true)
+  assert.equal(transport.sends.length, 2)
+})
+
 test('首轮网络故障返回正在重试；超时继续退避，成功清零，不补发开场白', async (t) => {
   const clock = pollingClock()
   const store = openWindow()

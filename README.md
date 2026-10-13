@@ -11,6 +11,7 @@ The plugin targets **DSH 0.2.x**. Its settings interface is currently in Chinese
 - Start or stop a monitoring window from **Settings → POPO自动水群**. A fresh installation stays idle until you configure a group and start it.
 - Use TypeSafe to judge conversations and drafts, and DSH's model service to generate replies. Select both models independently or follow the host's default generation model.
 - Configure the prompt, opening message, duration, polling interval, reply length, quiet hours, hourly cap, and automatic dry run.
+- Enable **只回复 @ 我的消息** in Overview to consider automatic replies only to new messages mentioning the current account. The switch defaults to off and saves immediately; opening messages and manual sends keep their existing behavior.
 - View recent group messages and local send, judgment, and round records.
 - Send a manually written message to the saved target group, including while monitoring is stopped.
 - Retry transient collection failures with backoff; stop after five consecutive failures. Authentication errors, missing CLI, invalid responses, and persistence failures stop monitoring immediately.
@@ -22,6 +23,8 @@ New messages → timing/content checks → TypeSafe judgment
 ```
 
 If judgment is unavailable, the default policy stays silent. **Manual send always sends real text**, even when automatic dry run is enabled. It bypasses automatic timing and judgment checks, but requires a valid saved group and non-empty text and prevents duplicate in-flight submissions. POPO sends use `source=AGENT`.
+
+Mention filtering combines the official `atMembers` search with an explicit `@current name or nickname` in the message. Broadcast-only mentions do not qualify; mixed broadcasts and direct mentions do. Missing identity, account mismatches, and lookup failures stay silent. The API does not expose the original mention list, so typed names or quoted mentions can still be mistaken for direct mentions.
 
 ## Dependencies
 

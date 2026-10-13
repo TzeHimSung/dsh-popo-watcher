@@ -37,6 +37,7 @@ export function validateGroup(value: unknown): string | undefined   // 纯数字
 | `hardMaxChars` | `120` | 20..1000（硬上限，拒发） |
 | `dryRun` | `false` | 布尔；仅影响自动发送和自动开场白，手动发送始终提交 |
 | `autoResume` | `true` | 布尔 |
+| `replyOnlyWhenMentioned` | `false` | 布尔；仅限制普通自动回复，开场白及手动发送豁免 |
 | `opening` | `{ enabled: true, text: '大家好，我是群聊助手，有合适的话题时会参与讨论。' }` | text 1..200 字 |
 | `quietHours` | `{ enabled: false, start: '23:00', end: '09:00' }` | `HH:MM` |
 | `hourlyCap` | `{ enabled: false, max: 6 }` | 1..60 |
@@ -96,12 +97,14 @@ export function createTransport({ spawn, resolve = resolveCli, timeoutMs = 20000
 {
   describe(): { ok: boolean, cliPath?: string, nodePath?: string, error?: string },
   checkAuth(): Promise<Result<{ uid: string }>>,
-  search({ group, pageSize = 15, sessionFile }): Promise<Result<{ uid: string, messages: Message[] }>>,
+  currentUser(): Promise<Result<{ uid: string, names: string[] }>>,
+  search({ group, pageSize = 15, sessionFile, atMembers?, timeStart?, timeEnd? }): Promise<Result<{ uid: string, messages: Message[] }>>,
   send({ group, text }): Promise<Result<{ msgId: string }>>,
 }
 ```
 
 - `Message = { t_msg: number, time: string, from: string, name: string, msgId: string, content: string }`（`time` 用本地 `YYYY-MM-DD HH:mm:ss`）。
+- `currentUser` 调用 `popo team_current_user_info`，只返回 UID 与非空、去重的 `name`/`nickname`。`atMembers` 必须为非空账号数组，使用 UTF-8 临时 JSON 文件传参；`timeStart`/`timeEnd` 为非负安全整数毫秒时间戳，始终保留群范围。
 - 失败结果为 `{ok:false, kind, error, code, retryable}`：`code` 保留上游错误码，否则为 `null`；只有 `FABRIC_NETWORK_ERROR` 与本地调用超时标记 `retryable:true`。错误摘要脱敏后截断，不回显凭据与 URL 参数。传输层所有调用仍只执行一次，只有采集循环重试，发送不重试。
 - argv（**不经 shell**）：`[nodePath, cliJs, 'popo', 'message_search', 'query=', 'type=1', 'page=0', 'pageSize=<n>', 'msgType=0', 'sessionList=@file:<sessionFile>']`；发送：`[..., 'popo', 'message_send_team', 'message=@text:<tmpFile>', 'receiver=<group>', 'source=AGENT']`，中文只走 UTF-8 文件，绝不进 argv 之外的命令行。
 - 解析（合成样本见 `test/fixtures/popo-search.json`）：`json.ok`、`json.code`、`json.data.data.data.data.uid`、`json.data.data.data.data.result_list[]`；行字段 `t_msg / nfrom / memberName / msg_id / content`。
@@ -123,7 +126,7 @@ export const DEFAULT_THRESHOLDS           // §6
 export const GO_KINDS / STOP_KINDS        // ['question','technical_topic','joke_or_tease'] / ['venting_or_conflict','logistics','closed']
 export function loadQuestions(readText?): { ok: boolean, questions?: { round: object, draft: object }, error?: string }   // 懒惰读 ./judge-questions.json，绝不抛
 export function formatAnswers(raw): object
-export function buildState({ messages, selfUid, sinceMs, newMark, sentMessages, chat? }): object
+export function buildState({ messages, selfUid, sinceMs, newMark, sentMessages, chat?, replyTargets? }): object
 export function decideRound(answers, thresholds = DEFAULT_THRESHOLDS): { action: 'opening'|'quiet'|'unsure', kind: string, guidance: string, reasons: string[], advisories: string[] }
 export function decideDraft(answers, draft, thresholds = DEFAULT_THRESHOLDS): { decision: 'pass'|'block', blocks: Array<{question,noul,reason}>, warnings: Array<{question,noul}>, chars: number }
 export function composeRound(view, judgement): view     // 语义层只能加拒绝/加 advisory，绝不放开机械 blocker
@@ -139,13 +142,19 @@ export function createRound({ judgeClient, draftWriter, logger, now }): { plan(i
 ### 5.1 `lib/round.js`（一轮的编排：判读 → 结论 → 文案）
 
 ```js
-export function buildDraftPrompt({ conversation, ourRecent, guidance, maxChars }): string
+export function buildDraftPrompt({ conversation, ourRecent, guidance, maxChars, onlyReplyTargets? }): string
 export function createRound({ judgeClient, draftWriter, logger, now }): { plan(input): Promise<Plan> }
-// input = { messages, newCount, selfUid, sentMessages, config, questions }
+// input = { messages, newCount, selfUid, sentMessages, config, questions, replyTargets?, selfDisplayName?, mentionReason? }
 // Plan   = { verdict: 'speak'|'quiet', view, judgement, draft, reason }
 ```
 
 顺序与纪律：
+
+开启 `replyOnlyWhenMentioned` 时，watcher 在机械检查通过后按本轮消息时间范围搜索 `atMembers=[selfUid]`，与本轮消息 ID 求交，再用当前姓名/昵称匹配正文 @ 标记。搜索 UID、当前用户 UID 必须与采集身份一致；失败、空结果或身份未知均返回 quiet 并记录原因。额外查询不写采集水位。搜索接口不返回原始 @ 成员清单，因此接受手打/引用同名 @ 的误判边界；混合 @所有人和直接 @ 我不排除。
+
+时间范围前后各放宽一秒，避免服务端时间精度使极窄毫秒区间漏查；最终消息 ID 交集保证范围内的旧消息不能触发回复。
+
+`replyTargets` 会补回上下文切片之外的本轮目标，只有这些目标标记为 `is_new`；判读使用当前显示名及回复范围，生成提示明确其余消息仅作背景。普通自动发送必须携带内部确认目标，公开 `sendNow` 传入同名字段不能豁免；开场白与手动发送不受此限制。关闭开关不增加搜索或用户信息调用。
 
 1. **机械层先跑**：`roundView()` 出 blocker（`noNewMessages` / `lastFromSelf` / `lastMessageHasNoText`），挡住就 `quiet` 且**不调判读**（不浪费请求）；
 2. **语义层**：`judgeClient.available()` → `runRound()` → `decideRound()` → `composeRoundView()`（只做加法，绝不放开机械 blocker）。判读不可用 → `judgeUnavailable` advisory；
@@ -248,6 +257,7 @@ RPC 结果信封：`{ ok:true, value }` / `{ ok:false, error:{ code, message, de
 - `error`：文件权限、解析、数据根等读取异常；保留详情并禁止 `updateConfig` 覆盖。显式 `reload:true` 可在修复后重新读取；普通 get/status 不重复读配置文件。
 - 正在采集或有未停止的有效窗口时，禁止修改 `group`/`intervalSec`，也禁止 reload；相同值不算修改，拒绝时整个 patch 不生效。临时配置处于 `unsaved` 时拒绝 reload，避免丢弃尚未持久化的值。
 - 前端遇到缺少 `configState` 的旧响应显示未知，不据此推断保存成功；已有 `written:true/false` 仍可用于确认本次保存结果。
+- 概览页的“只回复 @ 我的消息”复用监控滑块样式，使用 `config.set({patch:{replyOnlyWhenMentioned}})` 即时保存，运行期间也可切换。保存共用单飞锁，只更新基线并保留其他表单草稿；写盘失败显示实际临时值，可在概览中单独重试保存。`status` 同时返回当前 `replyOnlyWhenMentioned`。
 
 **密钥纪律（贯穿 RPC / 快照 / 日志）**：`key.set` / `key.clear` / `key.status` / `status` 的返回值里**只有"有没有 + 从哪来"**，绝不出现 key 本身；watcher 也只有 `keySource()`（取值给判读用）与 `hasStoredKey()`（给快照用的布尔）两条路径碰它。`keyStatus()` 里 `configured` 由"文件在不在"与"解析器怎么说"共同决定（不一致时以"能用"为准），所以页面不会出现"文件在、却显示未配置"这种自相矛盾。
 

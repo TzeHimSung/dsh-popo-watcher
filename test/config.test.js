@@ -25,6 +25,7 @@ const FIELDS = [
   'hardMaxChars',
   'dryRun',
   'autoResume',
+  'replyOnlyWhenMentioned',
   'opening',
   'quietHours',
   'hourlyCap',
@@ -73,6 +74,15 @@ test('defaultConfig() 逐字段等于 DEFAULTS', () => {
     assert.deepEqual(config[key], DEFAULTS[key], `${key} 应等于 DEFAULTS.${key}`)
   }
   assert.deepEqual(config, DEFAULTS, '整体也应等于 DEFAULTS')
+})
+
+test('只回复 @ 我默认关闭，兼容旧配置并只接受布尔值', () => {
+  assert.equal(defaultConfig().replyOnlyWhenMentioned, false)
+  assert.equal(normalize({ group: '1234567' }).config.replyOnlyWhenMentioned, false)
+  assert.equal(patch(defaultConfig(), { replyOnlyWhenMentioned: true }).config.replyOnlyWhenMentioned, true)
+  const invalid = normalize({ replyOnlyWhenMentioned: 'true' })
+  assert.equal(invalid.config.replyOnlyWhenMentioned, false)
+  hasWarning(invalid.warnings, 'replyOnlyWhenMentioned', '非法开关值')
 })
 
 test('defaultConfig() 两次调用互不共享引用，改一份不影响另一份', () => {

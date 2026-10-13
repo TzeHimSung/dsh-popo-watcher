@@ -71,7 +71,7 @@ export function createUi(React) {
       }, `${label}${id === 'settings' && (dirty || hasUnpersisted) ? ' · 未保存' : ''}`))),
       h('section', { className: 'dsh-popo-panel', id: 'popo-panel-overview', role: 'tabpanel', 'aria-labelledby': 'popo-tab-overview', hidden: tab !== 'overview', key: 'overview' }, [
         h('section', { className: 'dsh-popo-monitor', 'aria-label': '自动监控', key: 'monitor' }, [
-          h(Controls, { key: 'controls', connection, onDone: done, snapshot, view, blocked, defaultHours: settings.baseline?.windowHours, openingEnabled: settings.baseline?.opening?.enabled === true, configState: settings.configState }),
+          h(Controls, { key: 'controls', connection, onDone: done, snapshot, view, blocked, defaultHours: settings.baseline?.windowHours, openingEnabled: settings.baseline?.opening?.enabled === true, configState: settings.configState, settings, onMentionChange: saveConfig }),
           h(StatusCard, { key: 'status', snapshot, view, onRefresh: done }),
         ]),
         h(ManualSend, { key: 'manual', connection, onDone: done, group }),

@@ -1061,7 +1061,7 @@ test('重试请求执行中显示正在重试；第五次失败关闭开关且�
   const { harness } = await mountPage(t, connection, { timers: clock })
   assertTreeHas(harness.tree(), '采集重试中（4/5）')
   assertTreeHas(harness.tree(), '正在重试…')
-  assert.equal(findNodes(harness.tree(), node => node.props?.role === 'switch').length, 1)
+  assert.equal(findNodes(harness.tree(), node => node.props?.role === 'switch' && node.props['aria-label'] === '监控').length, 1)
   status = {
     ...status, window: { ...STATUS.window, stopped: true, collectionError: 'FABRIC_NETWORK_ERROR' },
     poll: { ...status.poll, running: false, recovering: false, consecutiveFailures: 5 },
@@ -1116,7 +1116,7 @@ test('控制卡：当前状态决定唯一开关，历史开始时间不生成�
   ]
   for (const [value, label] of cases) {
     const { harness } = await mountPage(t, routedConnection({ status: { ok: true, value } }))
-    const buttons = findNodes(harness.tree(), node => node.props?.role === 'switch')
+    const buttons = findNodes(harness.tree(), node => node.props?.role === 'switch' && node.props['aria-label'] === '监控')
     assert.equal(buttons.length, 1)
     assert.equal(buttons[0].props['data-action'], label)
     assert.equal(buttons[0].props['aria-label'], '监控')
@@ -1673,6 +1673,74 @@ test('三个页签保留草稿与记录，配置只读一次，轮询不覆盖�
   assert.equal(connection.calls.filter(([, method]) => method === 'config.get').length, 1)
   assert.equal(byAction(harness.tree(), '开始').props.disabled, true)
   assert.equal(byAction(harness.tree(), '发送').props.disabled, false, '未保存的自动设置不阻止手动发送')
+})
+
+test('@ 回复开关默认关闭，运行中单独保存并保留其他配置草稿', async (t) => {
+  let config = defaultConfig()
+  const connection = savingConnection({
+    status: { ok: true, value: STATUS },
+    'config.get': () => ({ ok: true, value: { config, configState: 'saved' } }),
+    'config.set': ({ patch }) => {
+      config = applyPatch(config, patch).config
+      return { ok: true, value: { config, configState: 'saved', written: true } }
+    },
+  })
+  const { harness } = await mountPage(t, connection)
+  const toggle = () => byAction(harness.tree(), '切换仅回复@我')
+  assert.equal(toggle().props['aria-checked'], false)
+  assert.equal(toggle().props.role, 'switch')
+  assert.equal(toggle().props.className, byAction(harness.tree(), '停止').props.className)
+  byField(harness.tree(), 'windowHours').props.onChange({ target: { value: '6' } })
+  toggle().props.onClick()
+  await harness.flush()
+  assert.equal(toggle().props['aria-checked'], true)
+  assert.equal(byField(harness.tree(), 'windowHours').props.value, '6')
+  assert.equal(config.windowHours, 24)
+  assert.deepEqual(connection.calls.filter(([, method]) => method === 'config.set').map(call => call[2]), [{ patch: { replyOnlyWhenMentioned: true } }])
+  byAction(harness.tree(), '保存').props.onClick()
+  await harness.flush()
+  assert.equal(config.windowHours, 6)
+  assert.equal(config.replyOnlyWhenMentioned, true)
+  const reopened = await mountPage(t, connection)
+  assert.equal(byAction(reopened.harness.tree(), '切换仅回复@我').props['aria-checked'], true)
+  assert.equal(connection.calls.some(([, method]) => ['start', 'stop', 'send.now'].includes(method)), false)
+})
+
+test('@ 回复开关阻止重复点击，请求失败保留旧值，写盘失败可独立重试', async (t) => {
+  const request = deferred()
+  let config = defaultConfig()
+  let attempts = 0
+  const connection = savingConnection({ 'config.set': ({ patch }) => {
+    if (++attempts === 1) return request.promise
+    config = applyPatch(config, patch).config
+    return { ok: true, value: { config, written: attempts > 2, configState: attempts > 2 ? 'saved' : 'unsaved' } }
+  } })
+  const { harness } = await mountPage(t, connection)
+  const toggle = () => byAction(harness.tree(), '切换仅回复@我')
+  const staleClick = toggle().props.onClick
+  staleClick()
+  staleClick()
+  assert.equal(attempts, 1)
+  assert.equal(toggle().props.disabled, true)
+  assert.equal(toggle().props['aria-busy'], true)
+  request.resolve({ ok: false, error: { message: 'offline' } })
+  await harness.flush()
+  assert.equal(toggle().props['aria-checked'], false)
+  assertTreeHas(harness.tree(), '保存失败')
+  toggle().props.onClick()
+  await harness.flush()
+  assert.equal(toggle().props['aria-checked'], true, '写盘失败仍显示服务端临时生效值')
+  assertTreeHas(harness.tree(), '仅临时生效，尚未保存')
+  byField(harness.tree(), 'windowHours').props.onChange({ target: { value: '' } })
+  byAction(harness.tree(), '重试保存回复范围').props.onClick()
+  await harness.flush()
+  assert.equal(attempts, 3)
+  assert.equal(byField(harness.tree(), 'windowHours').props.value, '', '重试不覆盖或提交其他草稿')
+  assert.equal(byAction(harness.tree(), '重试保存回复范围'), undefined)
+  assert.deepEqual(connection.calls.filter(([, method]) => method === 'config.set').at(-1)[2], { patch: { replyOnlyWhenMentioned: true } })
+  toggle().props.onClick()
+  await harness.flush()
+  assert.equal(toggle().props['aria-checked'], false)
 })
 
 test('配置提交是真正的嵌套增量，隐藏模型和阈值不会被表单覆盖', async (t) => {
