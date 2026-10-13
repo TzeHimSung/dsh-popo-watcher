@@ -9,7 +9,10 @@ The plugin targets **DSH 0.2.x**. Its settings interface is currently in Chinese
 ## Features
 
 - Start or stop a monitoring window from **Settings → POPO自动水群**. A fresh installation stays idle until you configure a group and start it.
-- Use TypeSafe to judge conversations and drafts, and DSH's model service to generate replies. Select both models independently or follow the host's default generation model.
+- When the effective generation provider is CodeMaker, starting or resuming monitoring first checks its live model-listing endpoint using the host's current configuration and credentials. A failed check or five-second timeout leaves monitoring stopped and shows the reason; retry by starting it again after fixing the endpoint. This checks connectivity without generating text.
+- Use TypeSafe to judge conversations and drafts, or disable it and let DSH's language model decide whether to reply and draft the response in one call. Uncertain TypeSafe judgments also go to the language model; explicit rejections remain final. Select both models independently or follow the host's default generation model.
+- Generation uses the host's model limits with no plugin token budget or overall generation deadline. The host still handles connection and stream failures; stopping monitoring cancels generation and releases the queue.
+- Merge new messages received while busy or cooling down into one bounded batch. After cooldown, the next successful poll re-evaluates the latest context, even when no new messages arrive.
 - Configure the prompt, opening message, duration, polling interval, reply length, quiet hours, hourly cap, and automatic dry run.
 - Enable **只回复 @ 我的消息** in Overview to consider automatic replies only to new messages mentioning the current account. The switch defaults to off and saves immediately; opening messages and manual sends keep their existing behavior.
 - View recent group messages and local send, judgment, and round records.
@@ -18,11 +21,11 @@ The plugin targets **DSH 0.2.x**. Its settings interface is currently in Chinese
 - Import existing watcher history from an explicitly selected directory without starting monitoring.
 
 ```text
-New messages → timing/content checks → TypeSafe judgment
-             → DSH model draft → final checks → POPO send → local records
+New/pending messages → timing/content checks → optional TypeSafe judgment
+                     → DSH model decision/draft → final checks → POPO send → local records
 ```
 
-If judgment is unavailable, the default policy stays silent. **Manual send always sends real text**, even when automatic dry run is enabled. It bypasses automatic timing and judgment checks, but requires a valid saved group and non-empty text and prevents duplicate in-flight submissions. POPO sends use `source=AGENT`.
+If enabled TypeSafe judgment is unavailable, the default policy stays silent. With TypeSafe disabled, no TypeSafe key is needed and the language model returns a reply or `SKIP`. **Manual send always sends real text**, even when automatic dry run is enabled. It bypasses automatic timing and judgment checks, but requires a valid saved group and non-empty text and prevents duplicate in-flight submissions. POPO sends use `source=AGENT`.
 
 Mention filtering combines the official `atMembers` search with an explicit `@current name or nickname` in the message. Broadcast-only mentions do not qualify; mixed broadcasts and direct mentions do. Missing identity, account mismatches, and lookup failures stay silent. The API does not expose the original mention list, so typed names or quoted mentions can still be mistaken for direct mentions.
 
@@ -33,7 +36,7 @@ Mention filtering combines the official `atMembers` search with an explicit `@cu
 | DSH **0.2.x** | Runtime, model service, RPC, and UI. Compatibility baseline: Desktop **0.2.0-rc.2**. The `@deepseek-ai/dsh-tools` peer range is `^0.2.0-rc.2`, excluding 0.1 and 0.3. |
 | `@deepseek-ai/cordis` **^4.0.2** | Host plugin framework, supplied by DSH. |
 | Official POPO CLI (`@popo/cli`) | Authenticated message search and sending. Obtain it through your organization's CLI distribution instructions and use an account with access to the target group. |
-| [TypeSafe](https://typesafe.ai/) API key | Conversation and draft judgment; default model: `jev-latest`. |
+| [TypeSafe](https://typesafe.ai/) API key | Optional conversation and draft judgment; required only when TypeSafe is enabled. Default model: `jev-latest`. |
 | A configured DSH language model | Automatic replies. Provider credentials are managed by DSH. |
 | Git | Cloning this repository for local installation. |
 | Node.js **24+**, npm, esbuild **0.28.2** | Development, client builds, and tests. esbuild is a development dependency only. |
@@ -84,7 +87,7 @@ Restart an already running web host after installation. Local installation links
 
 1. Open the plugin's **设置** tab, enter the target POPO group ID, and save. Defaults contain no real group.
 2. Configure a generation model in DSH, then select it in the plugin or keep **跟随宿主默认**.
-3. Enter a TypeSafe key under **判读凭证**, or provide `TYPESAFE_API_KEY` to the host process. Windows user environment variables are also supported. A key saved in the UI takes precedence.
+3. When using TypeSafe judgment, enter a key under **判读凭证**, or provide `TYPESAFE_API_KEY` to the host process. Windows user environment variables are also supported. A key saved in the UI takes precedence. Otherwise disable **使用 TypeSafe 判读** to use the language model alone.
 4. Click **检查 POPO CLI** to check the CLI and authentication. This does not start monitoring or send a message.
 5. Review the opening message and automatic-send settings, choose a duration, and start monitoring. Automatic dry run is **off** by default; the opening message is enabled.
 

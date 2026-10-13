@@ -1,14 +1,135 @@
 import assert from 'node:assert/strict'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { CHANNEL, createRpcHandler, registerRpc } from '../lib/rpc.js'
-import { listDraftModels } from '../lib/llm.js'
+import { checkCodeMakerConnection, createDraftWriter, listDraftModels } from '../lib/llm.js'
 import * as plugin from '../lib/index.js'
 
 const runtime = process.env.DSH_TEST_RUNTIME
+
+test('本机 DSH：插件不传 token 预算，真实适配器采用宿主模型上限', {
+  skip: runtime ? false : '需用 DSH 内置 Node 运行',
+}, async t => {
+  const load = name => import(pathToFileURL(join(runtime, 'node_modules', '@deepseek-ai', name, 'lib', 'index.js')).href)
+  const [{ Context }, { LlmRuntime }, pi] = await Promise.all([load('cordis'), load('dsh-llm'), load('dsh-llm-pi-ai')])
+  const requests = []
+  const server = createServer((req, res) => {
+    let body = ''
+    req.on('data', chunk => { body += chunk })
+    req.on('end', () => {
+      requests.push({ path: req.url, body: JSON.parse(body) })
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'Offline request captured; no model called.', type: 'invalid_request_error' } }))
+    })
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  const profiles = { codemaker: {
+    baseURL: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-responses', apiKeyEnv: 'OFFLINE_GENERATION_KEY',
+    models: [
+      { id: 'host-default-cap', contextWindow: 1000000, input: ['text'] },
+      { id: 'host-configured-cap', contextWindow: 1000000, input: ['text'], maxTokens: 16384 },
+    ],
+  } }
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin({ name: 'offline-generation-services', apply(owner) {
+    owner.provide('credentials', { resolve: async () => ({ value: 'synthetic-generation-key' }) })
+    owner.provide('settings', { configure: () => () => {}, describe: () => [] })
+  } })
+  await ctx.plugin({ name: 'offline-generation-adapter', inject: ['llm'], apply(owner) {
+    pi.apply(owner, { providers: { get: () => profiles } })
+  } })
+  let llm
+  await ctx.plugin({ name: 'offline-generation-consumer', inject: ['llm'], apply(owner) { llm = owner.get('llm') } })
+  await Promise.all([...ctx.registry.values()].flatMap(entry => [...entry.fibers].map(fiber => fiber.await())))
+  for (const [model, expected] of [['host-default-cap', 32768], ['host-configured-cap', 16384]]) {
+    let options
+    const writer = createDraftWriter({ getRoute: () => ({ provider: 'codemaker', model }), getLlm: () => ({
+      stream: input => { options = input; return llm.stream(input) },
+    }) })
+    const result = await writer.write({ prompt: 'Offline synthetic request.', maxTokens: 200, signal: AbortSignal.timeout(5000) })
+    assert.equal(result.ok, false, '本地接口只截获请求，刻意不生成回复')
+    assert.equal(Object.hasOwn(options, 'maxTokens'), false, '旧调用参数不能进入宿主调用')
+    assert.equal(requests.at(-1).path, '/v1/responses')
+    assert.equal(requests.at(-1).body.max_output_tokens, expected)
+  }
+  assert.equal(requests.length, 2)
+})
+
+test('本机 DSH：CodeMaker 启动检查通过真实 discovery 请求接口并复用宿主凭证', {
+  skip: runtime ? false : '需用 DSH 内置 Node 运行',
+}, async t => {
+  const load = name => import(pathToFileURL(join(runtime, 'node_modules', '@deepseek-ai', name, 'lib', 'index.js')).href)
+  const [{ Context }, { LlmRuntime }, pi] = await Promise.all([load('cordis'), load('dsh-llm'), load('dsh-llm-pi-ai')])
+  const requests = []
+  let reply = { status: 200, body: JSON.stringify({ data: [{ id: 'remote-only' }] }) }
+  const server = createServer((req, res) => {
+    requests.push({ method: req.method, path: req.url, auth: req.headers.authorization, header: req.headers['x-fixture'] })
+    res.writeHead(reply.status, { 'content-type': 'application/json' })
+    res.end(reply.body)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  let profiles = { codemaker: {
+    baseURL: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-responses',
+    apiKeyEnv: 'DSH_STARTUP_FIXTURE_KEY', headers: { 'x-fixture': 'host-header' },
+    models: [{ id: 'configured-alias', name: 'Offline configured model' }],
+  } }
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin({ name: 'offline-discovery-services', apply(owner) {
+    owner.provide('credentials', { resolve: async ref => {
+      assert.equal(ref, 'DSH_STARTUP_FIXTURE_KEY')
+      return { value: 'synthetic-discovery-secret' }
+    } })
+    owner.provide('settings', {
+      configure: () => () => {},
+      describe: () => [{ ns: 'llm-pi-ai', value: { providers: profiles } }],
+    })
+  } })
+  await ctx.plugin({ name: 'offline-native-discovery', inject: ['llm'], apply(owner) {
+    pi.apply(owner, { providers: { get: () => profiles } })
+  } })
+  let check
+  await ctx.plugin({ name: 'startup-consumer', apply(owner) {
+    check = () => checkCodeMakerConnection({ getRoute: () => ({ provider: 'codemaker', model: 'configured-alias' }),
+      getLlm: () => owner.get('llm'), getSettings: () => owner.get('settings'),
+    })
+  } })
+  await Promise.all([...ctx.registry.values()].flatMap(entry => [...entry.fibers].map(fiber => fiber.await())))
+  assert.deepEqual(await check(), { ok: true })
+  assert.deepEqual(requests, [{ method: 'GET', path: '/v1/models', auth: 'Bearer synthetic-discovery-secret', header: 'host-header' }])
+  profiles = { codemaker: { ...profiles.codemaker, baseURL: profiles.codemaker.baseURL.replace('/v1', '/gateway/v1') } }
+  assert.equal((await check()).ok, true)
+  assert.equal(requests.at(-1).path, '/gateway/v1/models')
+  for (const [status, body, expected] of [
+    [401, '{"error":"synthetic-discovery-secret"}', /HTTP 401/],
+    [403, 'synthetic-discovery-secret', /HTTP 403/],
+    [500, 'synthetic-discovery-secret', /HTTP 500/],
+    [200, 'not-json synthetic-discovery-secret', /不是合法 JSON/],
+    [200, '{"error":"synthetic-discovery-secret"}', /响应格式错误/],
+  ]) {
+    reply = { status, body }
+    const count = requests.length
+    const result = await check()
+    assert.equal(result.ok, false)
+    assert.match(result.error, expected)
+    assert.doesNotMatch(result.error, /synthetic-discovery-secret|host-header/)
+    assert.equal(requests.length, count + 1, '每次只请求一次，不重试或读取配置目录假装成功')
+  }
+  reply = { status: 200, body: '{"data":[]}' }
+  assert.equal((await check()).ok, true)
+  await new Promise(resolve => server.close(resolve))
+  // A pooled connection can observe the server close as a reset before reconnecting.
+  assert.match((await check()).error, /ECONNREFUSED|ECONNRESET/)
+  assert.equal(requests.every(entry => entry.method === 'GET'), true)
+})
 
 test('本机 DSH：完整插件在真实 Cordis/Connection 中提供当前 RPC 契约', {
   skip: runtime ? false : '需用 DSH 内置 Node 运行',

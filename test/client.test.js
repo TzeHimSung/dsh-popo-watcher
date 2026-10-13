@@ -530,6 +530,40 @@ const STATUS = {
 
 const IDLE = { ...STATUS, phase: 'idle', window: { active: false, stopped: false }, poll: { ...STATUS.poll, running: false } }
 
+test('自动回复状态区分冷却、待判、SKIP、生成失败和发送拒绝，旧快照也可读', async t => {
+  const cases = [
+    [{ pendingRound: { count: 2, retryAtMs: Date.parse('2026-10-13T12:01:00+08:00') } }, '等待冷却：2 条待判消息'],
+    [{ pendingRound: { count: 3, retryAtMs: null } }, '3 条消息待判'],
+    [{ round: { verdict: 'quiet', reason: 'model said SKIP' } }, '模型选择不回复（SKIP）'],
+    [{ round: { verdict: 'quiet', reason: 'draft unavailable: 模型中断' } }, '生成失败：模型中断'],
+    [{ round: { verdict: 'send-blocked', reason: 'draft: fixture', sendReason: 'too soon' } }, '发送被拒绝：too soon'],
+    [{ round: { verdict: 'cancelled' } }, '本轮已取消'],
+    [{}, '等待新消息'],
+  ]
+  for (const [patch, expected] of cases) {
+    const { harness } = await mountPage(t, savingConnection({ status: { ok: true, value: { ...STATUS, ...patch } } }))
+    const summary = findNodes(harness.tree(), node => node.props?.['aria-label'] === '自动回复状态')[0]
+    assertTreeHas(summary, expected)
+    harness.unmount()
+  }
+})
+
+test('停用 TypeSafe 时显示生成模型自行判断，设置和运行详情说明宿主上限', async t => {
+  const config = applyPatch(defaultConfig(), { judge: { enabled: false } }).config
+  const { harness } = await mountPage(t, savingConnection({
+    status: { ok: true, value: { ...STATUS, judge: { enabled: false }, pendingRound: { count: 0, retryAtMs: null } } },
+    'config.get': { ok: true, value: { config, configState: 'saved' } },
+  }))
+  assertTreeHas(harness.tree(), '由生成模型自行判断')
+  assertTreeHas(harness.tree(), '使用宿主模型上限')
+  byTab(harness.tree(), 'settings').props.onClick()
+  await harness.flush()
+  assertTreeHas(harness.tree(), '使用 TypeSafe 判读')
+  assertTreeHas(harness.tree(), '由生成模型自行判断是否回复')
+  assertTreeHas(harness.tree(), '使用宿主模型上限')
+  assert.equal(byField(harness.tree(), 'judgeEnabled').props.checked, false)
+})
+
 test('bundle 的注册 id 等于包名，package.json 声明了 web 客户端半', () => {
   const pkg = JSON.parse(readFileSync(PACKAGE_PATH, 'utf8'))
   const bundle = mount()
@@ -973,22 +1007,119 @@ test('监控成功后采集失败：开关关闭、保留错误，移除旧成�
   assert.equal(JSON.stringify(harness.tree()).includes('popo-cli 没有输出'), false)
 })
 
-test('首轮不可重试故障的 start 回包立即刷新停止状态，不留下开启成功提示', async (t) => {
+test('首轮采集故障只在状态区报错一次，恢复后不重新显示旧操作错误', async (t) => {
+  const error = 'popo-cli 没有输出（exit=0）'
+  for (const message of [error, `采集失败，已自动停止：${error}`]) {
+    const clock = clockStub()
+    let status = IDLE
+    const connection = savingConnection({
+      status: () => ({ ok: true, value: status }),
+      start: () => {
+        status = { ...IDLE, window: { ...STATUS.window, stopped: true, collectionError: error } }
+        return { ok: false, error: { message } }
+      },
+    })
+    const { harness } = await mountPage(t, connection, { timers: clock })
+    byAction(harness.tree(), '开始').props.onClick()
+    await harness.flush()
+    const monitor = findNodes(harness.tree(), node => node.props?.['aria-label'] === '自动监控')[0]
+    const summary = findNodes(monitor, node => node.props?.['aria-label'] === '运行状态')[0]
+    assert.equal(byAction(monitor, '开始').props['aria-checked'], false)
+    assert.equal(byAction(monitor, '开始').props.disabled, false)
+    assertTreeHas(monitor, '采集异常，已停止')
+    assertTreeHas(summary, error)
+    assert.equal(findNodes(monitor, node => node.props?.role === 'alert').length, 1)
+    assert.equal(/开始失败|窗口已开启/.test(JSON.stringify(monitor)), false)
+    const details = findNodes(harness.tree(), node => node.props?.['aria-label'] === '运行详情与诊断')[0]
+    assertTreeHas(details, error)
+    status = STATUS
+    clock.tick()
+    await harness.flush()
+    assert.equal(JSON.stringify(harness.tree()).includes(error), false)
+    assert.equal(byAction(harness.tree(), '停止').props['aria-checked'], true)
+  }
+})
+
+test('采集报错去重：状态刷新延迟或失败时保留操作错误，成功确认后才移除', async (t) => {
+  const clock = clockStub()
+  const pending = deferred()
+  const error = '认证失效'
+  let response = { ok: true, value: IDLE }
+  const connection = savingConnection({
+    status: () => response,
+    start: () => {
+      response = pending.promise
+      return { ok: false, error: { message: `采集失败，已自动停止：${error}` } }
+    },
+  })
+  const { harness } = await mountPage(t, connection, { timers: clock })
+  byAction(harness.tree(), '开始').props.onClick()
+  await harness.flush()
+  assertTreeHas(harness.tree(), '开始失败：采集失败，已自动停止：认证失效')
+  pending.resolve({ ok: false, error: { message: '状态读取失败' } })
+  await harness.flush()
+  assertTreeHas(harness.tree(), '状态读取失败')
+  assertTreeHas(harness.tree(), '开始失败：采集失败，已自动停止：认证失效')
+  response = { ok: true, value: { ...IDLE, window: { ...STATUS.window, stopped: true, collectionError: error } } }
+  clock.tick()
+  await harness.flush()
+  const monitor = findNodes(harness.tree(), node => node.props?.['aria-label'] === '自动监控')[0]
+  assertTreeHas(monitor, error)
+  assert.equal(findNodes(monitor, node => node.props?.role === 'alert').length, 1)
+  assert.equal(JSON.stringify(monitor).includes('开始失败'), false)
+})
+
+test('采集报错去重：不同的启动、连接和停止错误不能被采集错误覆盖', async (t) => {
+  const error = '认证失效'
+  for (const [action, message] of [
+    ['start', 'CodeMaker 接口检查失败：连接被拒绝'],
+    ['start', '宿主 RPC 断线'],
+    ['start', `采集失败，已自动停止：${error}；状态写入失败`],
+    ['stop', '停止状态写入失败'],
+  ]) {
+    let status = action === 'stop' ? STATUS : IDLE
+    const connection = savingConnection({
+      status: () => ({ ok: true, value: status }),
+      [action]: () => {
+        status = { ...IDLE, window: { ...STATUS.window, stopped: true, collectionError: error } }
+        if (message === '宿主 RPC 断线') throw new Error(message)
+        return { ok: false, error: { message } }
+      },
+    })
+    const { harness } = await mountPage(t, connection)
+    const label = action === 'stop' ? '停止' : '开始'
+    byAction(harness.tree(), label).props.onClick()
+    await harness.flush()
+    const monitor = findNodes(harness.tree(), node => node.props?.['aria-label'] === '自动监控')[0]
+    assertTreeHas(monitor, `${label}失败：${message}`)
+    assertTreeHas(findNodes(monitor, node => node.props?.['aria-label'] === '运行状态')[0], error)
+    assert.equal(findNodes(monitor, node => node.props?.role === 'alert').length, 2)
+  }
+})
+
+test('CodeMaker 启动检查失败：开关关闭、显示接口错误，重新打开页面仍显示停止原因', async t => {
   let status = IDLE
+  const error = 'CodeMaker 接口检查失败（http://127.0.0.1:12345/v1）：连接被拒绝（ECONNREFUSED）'
   const connection = savingConnection({
     status: () => ({ ok: true, value: status }),
     start: () => {
-      status = { ...IDLE, window: { ...STATUS.window, stopped: true, collectionError: '认证失效' } }
-      return { ok: false, error: { message: '采集失败，已自动停止：认证失效' } }
+      status = { ...IDLE, window: { ...IDLE.window, stopped: true, stoppedReason: error } }
+      return { ok: false, error: { code: 'popo-watcher/error', message: error, details: {} } }
     },
   })
   const { harness } = await mountPage(t, connection)
   byAction(harness.tree(), '开始').props.onClick()
   await harness.flush()
   assert.equal(byAction(harness.tree(), '开始').props['aria-checked'], false)
-  assertTreeHas(harness.tree(), '采集异常，已停止')
-  assertTreeHas(harness.tree(), '开始失败：采集失败，已自动停止：认证失效')
-  assert.equal(JSON.stringify(harness.tree()).includes('窗口已开启'), false)
+  assert.equal(byAction(harness.tree(), '开始').props.disabled, false)
+  assertTreeHas(harness.tree(), `开始失败：${error}`)
+  assertTreeHas(harness.tree(), '停止原因')
+  assertTreeHas(harness.tree(), error)
+  assert.equal(/窗口已开启|采集异常|采集失败/.test(JSON.stringify(harness.tree())), false)
+  const reopened = await mountPage(t, connection)
+  assert.equal(byAction(reopened.harness.tree(), '开始').props['aria-checked'], false)
+  assertTreeHas(reopened.harness.tree(), '停止原因')
+  assertTreeHas(reopened.harness.tree(), error)
 })
 
 test('首轮进入重试时开关保持开启，显示次数与时间；恢复后清除错误和旧重试提示', async (t) => {
@@ -1780,18 +1911,37 @@ test('默认时长随保存更新，手动覆盖的本次时长保持独立', as
   assert.equal(byField(harness.tree(), 'hours').props.value, '2')
 })
 
-test('每小时上限与开场白关闭后保留配置值，打开时显示并校验', async (t) => {
+test('每小时限额保持可见，开场白随开关展开，关闭后保留输入与配置', async (t) => {
   const connection = savingConnection()
   const { harness } = await mountPage(t, connection)
+  byTab(harness.tree(), 'settings').props.onClick()
+  const hidden = key => findNodes(harness.tree(), node => node.props?.hidden === true && byField(node, key)).length > 0
   assert.equal(byField(harness.tree(), 'hourlyCapMax').props.value, '6')
   assert.equal(byField(harness.tree(), 'hourlyCapMax').props.disabled, true)
+  assert.equal(hidden('hourlyCapMax'), false)
   byField(harness.tree(), 'hourlyCapEnabled').props.onChange({ target: { checked: true } })
   assert.equal(byField(harness.tree(), 'hourlyCapMax').props.disabled, false)
   byField(harness.tree(), 'hourlyCapMax').props.onChange({ target: { value: '61' } })
   assert.equal(byAction(harness.tree(), '保存').props.disabled, true)
+  for (const id of byField(harness.tree(), 'hourlyCapMax').props['aria-describedby'].split(' ')) {
+    assert.equal(findNodes(harness.tree(), node => node.props?.id === id).length, 1, '单位和错误提示关联有效')
+  }
   byField(harness.tree(), 'hourlyCapMax').props.onChange({ target: { value: '9' } })
+  byField(harness.tree(), 'hourlyCapEnabled').props.onChange({ target: { checked: false } })
+  assert.equal(byField(harness.tree(), 'hourlyCapMax').props.value, '9')
+  assert.equal(hidden('hourlyCapMax'), false)
+  byField(harness.tree(), 'hourlyCapEnabled').props.onChange({ target: { checked: true } })
+  assert.equal(hidden('openingText'), false)
+  byField(harness.tree(), 'openingText').props.onChange({ target: { value: '保留的开场白草稿' } })
   byField(harness.tree(), 'openingEnabled').props.onChange({ target: { checked: false } })
-  assert.equal(byField(harness.tree(), 'openingText').props.value, defaultConfig().opening.text)
+  assert.equal(hidden('openingText'), true)
+  assert.equal(byField(harness.tree(), 'openingText').props.disabled, true)
+  assert.equal(byField(harness.tree(), 'openingText').props.value, '保留的开场白草稿')
+  byField(harness.tree(), 'openingEnabled').props.onChange({ target: { checked: true } })
+  assert.equal(hidden('openingText'), false)
+  assert.equal(byField(harness.tree(), 'openingText').props.disabled, false)
+  assert.equal(byField(harness.tree(), 'openingText').props.value, '保留的开场白草稿')
+  byField(harness.tree(), 'openingEnabled').props.onChange({ target: { checked: false } })
   byAction(harness.tree(), '保存').props.onClick()
   await harness.flush()
   assert.deepEqual(connection.calls.find(([, method]) => method === 'config.set')[2].patch, { hourlyCap: { enabled: true, max: 9 }, opening: { enabled: false } })
@@ -2179,7 +2329,7 @@ test('模型选择：首次进入设置才拉目录，同名模型按提供方�
   assert.deepEqual(connection.calls.find(([, method]) => method === 'config.set')[2], {
     patch: { judge: { model: 'jev-preview' }, llm: { provider: 'second', model: 'shared-id' } },
   })
-  assert.deepEqual(config.llm, { provider: 'second', model: 'shared-id', temperature: 0.4, maxTokens: 320 })
+  assert.deepEqual(config.llm, { provider: 'second', model: 'shared-id', temperature: 0.4 })
   assert.equal(config.judge.thresholds.roundFiller, 0.93)
   harness.unmount()
   const reopened = (await mountPage(t, connection)).harness

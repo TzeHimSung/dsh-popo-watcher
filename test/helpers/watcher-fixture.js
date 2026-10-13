@@ -52,6 +52,8 @@ export function watcherFixture(t, options = {}) {
     schedule: () => () => {}, getTransport: () => transport, judgeClient,
     keyResolver: async () => ({ key: '', source: 'none' }),
     draftWriter: options.draftWriter,
+    checkStartup: options.checkStartup,
+    getModelSelection: options.getModelSelection,
   })
   t.after(() => watcher.dispose())
   return { watcher, dir, root, env, transport, judgeClient, sent, drafts, now, advance: ms => { time += ms } }

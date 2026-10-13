@@ -65,3 +65,24 @@ export function generationModelText(llm) {
   }
   return llm?.provider && llm?.model ? `插件指定：${llm.provider} / ${llm.model}` : '跟随宿主默认（实际型号待宿主返回）'
 }
+
+export function replyStatusText(value = {}) {
+  if (value.phase === 'disposed' || value.window?.stopped === true) return '自动回复已停止'
+  if (typeof value.window?.remainingSec === 'number' && value.window.remainingSec <= 0) return '自动回复窗口已到期'
+  const pending = value.pendingRound
+  if (pending?.count > 0) {
+    return Number.isFinite(pending.retryAtMs)
+      ? `等待冷却：${pending.count} 条待判消息；最早 ${new Date(pending.retryAtMs).toLocaleString('zh-CN', { hour12: false })} 后成功采集时重新判断。`
+      : `${pending.count} 条消息待判，将在下一次成功采集后处理。`
+  }
+  const round = value.round
+  if (!round) return '等待新消息'
+  if (round.verdict === 'send-blocked') return `发送被拒绝：${round.sendReason || round.reason || '发送条件未满足'}`
+  if (round.verdict === 'cancelled') return '本轮已取消'
+  if (round.reason === 'model said SKIP') return '模型选择不回复（SKIP）'
+  if (String(round.reason).startsWith('draft unavailable:')) return `生成失败：${round.reason.slice('draft unavailable:'.length).trim()}`
+  if (round.reason === 'draft empty') return '生成失败：模型没有返回正文'
+  if (round.verdict === 'sent') return '本轮回复已发送'
+  if (round.verdict === 'dry') return '演练完成，未发送'
+  return `本轮不回复：${round.reason || round.verdict || '暂无详情'}`
+}

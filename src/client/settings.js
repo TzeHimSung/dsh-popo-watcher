@@ -7,31 +7,49 @@ export function createSettings(React, { noteLine, useLifetime, useActionFocus })
     const state = props.state
     const draft = state.draft ?? draftOf(null)
     const disabled = state.phase !== 'ready' || state.busy
-    const fields = CONFIG_FIELDS.filter(spec => spec.type !== 'model').map(spec => {
+    function control(key, unit) {
+      const spec = CONFIG_FIELDS.find(field => field.key === key)
       const fieldDisabled = disabled || (props.locked && ['group', 'intervalSec'].includes(spec.key))
-      if (spec.type === 'checkbox') return h('label', { className: 'dsh-popo-check dsh-popo-wide', key: spec.key }, [
-        h('input', { type: 'checkbox', 'data-field': spec.key, checked: draft[spec.key] === true, disabled: fieldDisabled, onChange: event => props.onChange(spec.key, event.target.checked === true) }),
-        h('span', null, spec.label),
-      ])
+      const id = `popo-config-${key}`
+      if (spec.type === 'checkbox') return h('input', {
+        id, type: 'checkbox', 'data-field': key, checked: draft[key] === true, disabled: fieldDisabled,
+        onChange: event => props.onChange(key, event.target.checked === true),
+      })
       const inactive = spec.enabledBy && draft[spec.enabledBy] !== true
-      const error = state.phase === 'ready' ? props.errors[spec.key] : null
+      const error = state.phase === 'ready' ? props.errors[key] : null
       const input = {
-        className: 'dsh-popo-input',
-        'data-field': spec.key,
-        value: String(draft[spec.key] ?? ''),
+        id, className: 'dsh-popo-input', 'data-field': key,
+        'aria-label': key === 'hourlyCapMax' ? spec.label : undefined,
+        value: String(draft[key] ?? ''),
         disabled: Boolean(fieldDisabled || inactive),
         'aria-invalid': Boolean(error),
-        'aria-describedby': error ? `popo-error-${spec.key}` : undefined,
-        onChange: event => props.onChange(spec.key, String(event.target.value)),
+        'aria-describedby': [unit && `popo-unit-${key}`, error && `popo-error-${key}`].filter(Boolean).join(' ') || undefined,
+        onChange: event => props.onChange(key, String(event.target.value)),
       }
-      return h('label', { className: `dsh-popo-field${spec.type === 'textarea' ? ' dsh-popo-wide' : ''}`, key: spec.key, hidden: spec.key === 'hourlyCapMax' && inactive }, [
-        h('span', { className: 'dsh-popo-k' }, spec.label),
-        spec.type === 'textarea'
-          ? h('textarea', { ...input, rows: 3, maxLength: 200 })
-          : h('input', { ...input, type: spec.type, min: spec.min, max: spec.max, step: spec.type === 'number' ? 'any' : undefined }),
-        error ? h('span', { className: 'dsh-popo-err', id: `popo-error-${spec.key}` }, error) : null,
+      if (spec.type === 'textarea') return h('textarea', { ...input, rows: 3, maxLength: 200 })
+      const field = h('input', { ...input, type: spec.type, min: spec.min, max: spec.max, step: spec.type === 'number' ? 'any' : undefined })
+      return unit ? h('div', { className: 'dsh-popo-setting-input' }, [
+        field,
+        h('span', { className: 'dsh-popo-setting-unit', id: `popo-unit-${key}` }, unit),
+      ]) : field
+    }
+    function errorLine(key) {
+      const error = state.phase === 'ready' ? props.errors[key] : null
+      return error ? h('span', { className: 'dsh-popo-err', id: `popo-error-${key}` }, error) : null
+    }
+    function row(key, label, unit) {
+      return h('div', { className: 'dsh-popo-setting-row', key }, [
+        h('label', { htmlFor: `popo-config-${key}` }, label),
+        h('div', { className: 'dsh-popo-setting-control' }, control(key, unit)),
+        errorLine(key),
       ])
-    })
+    }
+    function group(key, title, rows) {
+      return h('section', { className: 'dsh-popo-setting-group', key, 'aria-labelledby': `popo-settings-${key}` }, [
+        h('h4', { className: 'dsh-popo-title', id: `popo-settings-${key}` }, title),
+        ...rows,
+      ])
+    }
     return h('section', { className: 'dsh-popo-card', 'aria-label': '监控与自动发送设置' }, [
       h('div', { className: 'dsh-popo-head', key: 'head' }, [
         h('h3', { className: 'dsh-popo-title' }, '监控与自动发送'),
@@ -42,7 +60,36 @@ export function createSettings(React, { noteLine, useLifetime, useActionFocus })
         h('p', { className: 'dsh-popo-err' }, '配置读取失败，保存已禁用。修复配置或连接后重新读取。'),
         h('button', { type: 'button', className: 'dsh-popo-btn', 'data-action': '重新读取配置', onClick: props.onReload }, '重新读取配置'),
       ]) : null,
-      h('div', { className: 'dsh-popo-form', key: 'form' }, fields),
+      h('div', { className: 'dsh-popo-settings', key: 'form' }, [
+        group('monitor', '监控参数', [
+          row('group', '群 ID'),
+          row('intervalSec', '轮询间隔', '秒'),
+          row('windowHours', '默认时长', '小时'),
+        ]),
+        group('sending', '自动发送', [
+          row('minGapSec', '最小间隔', '秒'),
+          row('maxChars', '长度提醒', '字'),
+          row('hardMaxChars', '长度上限', '字'),
+          row('dryRun', '仅演练'),
+          row('judgeEnabled', '使用 TypeSafe 判读'),
+          h('p', { className: 'dsh-popo-note', key: 'judge-mode' }, draft.judgeEnabled
+            ? '判读不确定时，由生成模型复核是否值得回复。'
+            : '由生成模型自行判断是否回复；没有合适内容时保持安静。'),
+          h('div', { className: 'dsh-popo-setting-row', key: 'hourlyCap' }, [
+            h('label', { htmlFor: 'popo-config-hourlyCapEnabled' }, '限制每小时条数'),
+            h('div', { className: 'dsh-popo-setting-control' }, [control('hourlyCapMax', '条/小时'), control('hourlyCapEnabled')]),
+            errorLine('hourlyCapMax'),
+          ]),
+        ]),
+        group('opening', '开场白', [
+          row('openingEnabled', '开始监控后自动打招呼'),
+          h('div', { className: 'dsh-popo-field', key: 'openingText', hidden: draft.openingEnabled !== true }, [
+            h('label', { className: 'dsh-popo-sr', htmlFor: 'popo-config-openingText' }, '开场白内容'),
+            control('openingText'),
+            errorLine('openingText'),
+          ]),
+        ]),
+      ]),
       Array.isArray(state.warnings) && state.warnings.length ? h('details', { className: 'dsh-popo-details', key: 'warnings' }, [
         h('summary', null, `配置详情（${state.warnings.length} 条）`),
         h('p', { className: 'dsh-popo-note' }, state.warnings.join('\n')),
@@ -90,6 +137,7 @@ export function createSettings(React, { noteLine, useLifetime, useActionFocus })
             }, model.name === model.id ? model.id : `${model.name}（${model.id}）`)))),
           ]),
           h('span', { className: 'dsh-popo-note' }, `已生效：${generationModelText(props.snapshot.value?.llm ?? state.baseline?.llm)}`),
+          h('span', { className: 'dsh-popo-note' }, '使用宿主模型上限，插件不设置 token 预算或推理总时限。'),
           models.llm.error ? h('span', { className: 'dsh-popo-err', role: 'status' }, models.llm.error) : null,
           ...providers.filter(provider => provider.error).map(provider => h('span', { className: 'dsh-popo-err', key: provider.id }, `${provider.name}：${provider.error}`)),
           models.llm.phase === 'ready' && !providers.some(provider => provider.models.length)
@@ -105,7 +153,8 @@ export function createSettings(React, { noteLine, useLifetime, useActionFocus })
             !judgeFound ? h('option', { value: draft.judgeModel, disabled: true, key: 'current' }, draft.judgeModel ? `${draft.judgeModel}（${currentLabel(models.judge.phase)}）` : '请选择判读模型') : null,
             ...judgeModels.map(model => h('option', { value: model.id, key: model.id }, model.name)),
           ]),
-          h('span', { className: 'dsh-popo-note' }, `已生效：${state.baseline?.judge?.model || '未提供模型'}${state.baseline?.judge?.enabled === false ? '（判读已停用）' : ''}`),
+          h('span', { className: 'dsh-popo-note' }, state.baseline?.judge?.enabled === false
+            ? 'TypeSafe 判读已停用，由生成模型自行判断。' : `已生效：${state.baseline?.judge?.model || '未提供模型'}`),
           models.judge.error ? h('span', { className: 'dsh-popo-err', role: 'status' }, models.judge.error) : null,
           models.judge.phase === 'ready' && judgeModels.length === 0 ? h('span', { className: 'dsh-popo-note' }, 'TypeSafe 未返回可选模型。') : null,
         ]),

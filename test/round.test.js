@@ -2,7 +2,7 @@
  * 轮次编排（round）测试：机械层 → 语义层 → 文案层的编排结论。
  *
  * 全部用桩判读客户端 / 桩文案层，不联网、不碰真实模型；重点验证
- * **判读只能加拒绝**、判读不可用时的两种取向、以及"拿不准就安静"。
+ * **明确拒绝不可绕过**、判读不可用时的两种取向、以及关闭/不确定时的 LLM 自行判断。
  *
  * @module dsh-popo-watcher/test/round
  */
@@ -96,10 +96,12 @@ function plan(options = {}) {
   return runner.plan({
     messages: options.messages ?? messages(),
     newCount: options.newCount ?? 2,
+    newMessageIds: options.newMessageIds,
     selfUid: options.selfUid ?? 'u-self',
     sentMessages: options.sentMessages ?? [],
     config: options.config ?? { judge: { enabled: true }, maxChars: 50, prompt: { system: 'SYS' }, llm: { maxTokens: 200 } },
-    questions: options.questions ?? { kind: {} },
+    questions: 'questions' in options ? options.questions : { kind: {} },
+    signal: options.signal,
   })
 }
 
@@ -132,11 +134,11 @@ test('判读说有切口 → speak，并把引导语写进文案提示词', asyn
   assert.match(prompt, /This one is aimed at our account/, '导语应当来自判读的 guidance')
   assert.match(prompt, /SKIP/)
   assert.equal(writer.calls[0].system, 'SYS')
-  assert.equal(writer.calls[0].maxTokens, 200)
+  assert.equal(Object.hasOwn(writer.calls[0], 'maxTokens'), false)
   assert.equal(writer.calls[0].temperature, undefined, '配置没给温度就不带')
 })
 
-test('文案层拿到的是配置里的温度与 maxTokens（不是硬编码）', async () => {
+test('文案层透传温度，忽略遗留 maxTokens，群消息字数要求仍有效', async () => {
   const writer = draftWriter()
   const result = await plan({
     draftWriter: writer,
@@ -144,7 +146,7 @@ test('文案层拿到的是配置里的温度与 maxTokens（不是硬编码）'
   })
 
   assert.equal(result.verdict, 'speak')
-  assert.equal(writer.calls[0].maxTokens, 256)
+  assert.equal(Object.hasOwn(writer.calls[0], 'maxTokens'), false)
   assert.equal(writer.calls[0].temperature, 0.2)
   assert.match(writer.calls[0].prompt, /30 字以内/)
 })
@@ -160,14 +162,16 @@ test('判读说没切口 → quiet，且语义层加出的 noOpening 出现在 b
   assert.equal(writer.calls.length, 0, '没切口就不写文案')
 })
 
-test('判读拿不准（unsure）→ 安静，不花钱写文案', async () => {
-  const writer = draftWriter()
-  const result = await plan({ judgeClient: judgeClient({ answers: UNSURE_ANSWERS }), draftWriter: writer })
-
-  assert.equal(result.verdict, 'quiet')
-  assert.equal(result.view.verdict, 'judge')
-  assert.ok(result.view.advisories.includes('judgeUnsure'))
-  assert.equal(writer.calls.length, 0)
+test('判读拿不准（unsure）→ LLM 复核，可以回复，也可以 SKIP', async () => {
+  for (const text of ['先检查连接池等待时间。', 'SKIP']) {
+    const writer = draftWriter({ text })
+    const result = await plan({ judgeClient: judgeClient({ answers: UNSURE_ANSWERS }), draftWriter: writer })
+    assert.equal(result.verdict, text === 'SKIP' ? 'quiet' : 'speak')
+    assert.equal(result.decisionSource, 'llm')
+    assert.ok(result.view.advisories.includes('judgeUnsure'))
+    assert.equal(writer.calls.length, 1)
+    assert.match(writer.calls[0].prompt, /自行判断/)
+  }
 })
 
 test('判读不可用 + 默认取向 quiet → 安静', async () => {
@@ -208,15 +212,38 @@ test('判读不可用 + unavailablePolicy=llm → 交给模型：SKIP 就安静�
   assert.ok(spoke.view.advisories.includes('judgeUnavailable'))
 })
 
-test('判读被整轮关掉（judge.enabled=false）时也不自动发言', async () => {
+test('关闭 TypeSafe 后无需判读客户端或问句，由 LLM 决定回复或 SKIP', async () => {
+  let calls = 0
+  const unexpected = () => { calls++; throw new Error('TypeSafe 不应调用') }
+  for (const text of ['先检查连接池等待时间。', 'SKIP']) {
+    const writer = draftWriter({ text })
+    const result = await plan({
+      judgeClient: { available: unexpected, runRound: unexpected }, draftWriter: writer,
+      config: { judge: { enabled: false, unavailablePolicy: 'quiet' }, prompt: {}, llm: {} }, questions: null,
+    })
+    assert.equal(result.verdict, text === 'SKIP' ? 'quiet' : 'speak')
+    assert.equal(result.decisionSource, 'llm')
+    assert.equal(result.view.advisories.includes('judgeUnavailable'), false)
+    assert.equal(writer.calls.length, 1)
+    assert.match(writer.calls[0].prompt, /自行判断/)
+  }
+  assert.equal(calls, 0)
   const writer = draftWriter()
-  const result = await plan({
-    judgeClient: judgeClient(),
-    draftWriter: writer,
-    config: { judge: { enabled: false }, prompt: {}, llm: {} },
-  })
-  assert.equal(result.verdict, 'quiet')
-  assert.equal(writer.calls.length, 0)
+  const blocked = await plan({ newCount: 0, config: { judge: { enabled: false } }, draftWriter: writer })
+  assert.equal(blocked.verdict, 'quiet')
+  assert.equal(writer.calls.length, 0, '关闭判读不绕过机械守卫')
+})
+
+test('合并批次按消息 ID 标新，保留最新 14 条之外仍待判的消息', async () => {
+  const rows = Array.from({ length: 20 }, (_, i) => ({ ...messages()[0], msgId: `batch-${i}`, t_msg: 1000 + i, content: `消息${i}` }))
+  const client = judgeClient()
+  const writer = draftWriter()
+  await plan({ messages: rows, newCount: 2, newMessageIds: ['batch-0', 'batch-18'], judgeClient: client, draftWriter: writer })
+  assert.deepEqual(client.calls[0].state.conversation.filter(row => row.is_new).map(row => row.text), ['消息0', '消息18'])
+  assert.match(writer.calls[0].prompt, /\[新\].*消息0/)
+  assert.doesNotMatch(writer.calls[0].prompt, /\[新\].*消息19/)
+  const empty = await plan({ newMessageIds: [], draftWriter: writer })
+  assert.equal(empty.reason, 'mechanical: noNewMessages')
 })
 
 test('没有文案层 / 文案层抛错 / 文案层返回空 → 一律安静，绝不抛', async () => {

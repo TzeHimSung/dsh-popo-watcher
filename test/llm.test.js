@@ -161,15 +161,17 @@ test('write：温度按配置传给宿主，非法值不发（宿主会用它做
 
   await writer.write({ prompt: 'P', temperature: 0.9 })
   assert.equal(llm.calls[0].temperature, 0.9)
-  assert.equal(llm.calls[0].maxTokens, 200, '没给 maxTokens 时用默认 200')
+  assert.equal(Object.hasOwn(llm.calls[0], 'maxTokens'), false, '预算交给宿主，不在插件里设置回落值')
+  await writer.write({ prompt: 'P', maxTokens: 200 })
+  assert.equal(Object.hasOwn(llm.calls.at(-1), 'maxTokens'), false, '旧调用参数同样被忽略')
 
   await writer.write({ prompt: 'P', temperature: '0.3' })
-  assert.equal(llm.calls[1].temperature, 0.3, '数字字符串也认')
+  assert.equal(llm.calls.at(-1).temperature, 0.3, '数字字符串也认')
 
   for (const bad of [undefined, null, '', 'hot', -1, 3, Number.NaN]) {
     await writer.write({ prompt: 'P', temperature: bad })
   }
-  for (const call of llm.calls.slice(2)) {
+  for (const call of llm.calls.slice(3)) {
     assert.equal(Object.hasOwn(call, 'temperature'), false, '非法温度应当整个不发（让宿主用默认档）')
   }
 })
@@ -225,25 +227,41 @@ test('write：流里抛错、服务取用抛错都只返回失败，绝不抛', 
   assert.equal((await badRoute.write({ prompt: 'P' })).ok, false)
 })
 
-test('write：超时会 abort，并把超时如实报出来', async () => {
-  // 桩服务只会一直等信号：这样超时路径是确定性的（不靠真实网络）。
-  const llm = {
-    stream(options) {
-      return (async function* generate() {
-        await new Promise((resolve, reject) => {
-          options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
-          setTimeout(resolve, 5000)
-        })
-        yield { type: 'text-delta', text: '太迟了' }
-      })()
-    },
-  }
-  const writer = createDraftWriter({ getLlm: () => llm, getRoute: () => ROUTE, timeoutMs: 1 })
-  const started = Date.now()
-  const result = await writer.write({ prompt: 'P' })
-  const elapsed = Date.now() - started
+test('write：超过 20 秒仍允许正常完成，插件不设置总时限', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let release
+  const output = new Promise(resolve => { release = resolve })
+  const llm = fakeLlm([], { onStream: () => output })
+  const writer = createDraftWriter({ getLlm: () => llm, getRoute: () => ROUTE })
+  const pending = writer.write({ prompt: 'P' })
+  await Promise.resolve()
+  t.mock.timers.tick(60_000)
+  await Promise.resolve()
+  release([{ type: 'text-delta', text: '完整回复' }, { type: 'finish', reason: { kind: 'stop' } }])
+  const result = await pending
+  assert.equal(result.ok, true)
+  assert.equal(result.text, '完整回复')
+  assert.equal(result.finishReason, 'stop')
+})
 
+test('write：取消立即返回，忽略取消的适配器迟到输出不会变成成功', async () => {
+  const controller = new AbortController()
+  let release
+  const output = new Promise(resolve => { release = resolve })
+  const llm = fakeLlm([], { onStream: () => output })
+  const writer = createDraftWriter({ getLlm: () => llm, getRoute: () => ROUTE })
+  const pending = writer.write({ prompt: 'P', signal: controller.signal })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(llm.calls[0].signal, controller.signal)
+  controller.abort(new Error('user stopped'))
+  const result = await pending
   assert.equal(result.ok, false)
-  assert.ok(elapsed < 4000, `应当在 1s 左右返回，实际 ${elapsed}ms`)
-  assert.match(result.error, /超时|aborted/)
+  assert.equal(result.cancelled, true)
+  assert.match(result.error, /取消/)
+  release([{ type: 'text-delta', text: '不应使用的迟到回复' }, { type: 'finish', reason: 'stop' }])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal((await pending).cancelled, true)
+  const before = llm.calls.length
+  assert.equal((await writer.write({ prompt: 'P', signal: controller.signal })).cancelled, true)
+  assert.equal(llm.calls.length, before, '已取消的请求不启动模型')
 })

@@ -34,6 +34,8 @@
     import { defaultConfig, applyPatch } from '/config.js'
     const params = new URLSearchParams(location.search)
     const scenario = params.get('scenario') || 'default'
+    const replyScenarios = { 'reply-cooldown': '自动回复 / 等待冷却', 'reply-pending': '自动回复 / 合并待判', 'reply-skip': '自动回复 / SKIP', 'reply-failed': '自动回复 / 生成失败', 'reply-blocked': '自动回复 / 发送拒绝', 'llm-only': '自动回复 / 仅语言模型' }
+    for (const [value, label] of Object.entries(replyScenarios)) document.getElementById('qa-scenario').add(new Option(label, value))
     for (const key of ['width', 'height', 'theme', 'zoom', 'scenario']) {
       const element = document.getElementById(`qa-${key}`)
       if (params.has(key)) element.value = params.get(key)
@@ -64,6 +66,7 @@
     config.judge.model = 'custom-preserved-model'
     config.judge.timeoutMs = 12345
     config.judge.thresholds.roundFiller = 0.97
+    if (scenario === 'llm-only') config.judge.enabled = false
     const diagnostics = ['diagnostics', 'diagnostics-long'].includes(scenario)
     if (diagnostics) {
       config.intervalSec = 20
@@ -86,6 +89,7 @@
     let mode = ['running', 'muted', 'stopped', 'expired', 'degraded', 'retrying', 'retry-stopped', 'historical-error'].includes(scenario) ? scenario : ['long-error', 'stale'].includes(scenario) ? 'running' : 'idle'
     if (diagnostics) mode = 'degraded'
     if (scenario === 'persistence-error') mode = 'stopped'
+    if (Object.hasOwn(replyScenarios, scenario)) mode = 'running'
     let sentCount = scenario === 'long-error' ? 123456789 : scenario === 'historical-error' ? 13 : 10
     let statusReads = 0
     const calls = []
@@ -110,6 +114,12 @@
         judge: config.judge, llm: { ...config.llm, resolved: config.llm.provider && config.llm.model
           ? { provider: config.llm.provider, model: config.llm.model, source: 'plugin' }
           : { ...defaultSelection, source: 'host' } }, dryRun: config.dryRun,
+        pendingRound: { count: scenario === 'reply-cooldown' ? 2 : scenario === 'reply-pending' ? 3 : 0, retryAtMs: scenario === 'reply-cooldown' ? Date.now() + 10000 : null },
+        round: ['reply-skip', 'reply-failed', 'reply-blocked'].includes(scenario) ? {
+          at: '2026-10-13 12:00:00', verdict: scenario === 'reply-blocked' ? 'send-blocked' : 'quiet',
+          reason: scenario === 'reply-skip' ? 'model said SKIP' : scenario === 'reply-failed' ? 'draft unavailable: 模型流未正常结束（缺少 finish/stop）' : 'draft: preview-model',
+          sendReason: scenario === 'reply-blocked' ? 'too soon' : '', decisionSource: 'llm', model: 'preview-model', finishReason: scenario === 'reply-failed' ? null : 'stop',
+        } : null,
         transport: { ok: true }, degraded: { active: mode === 'degraded', reason: diagnostics ? 'popo-cli 返回失败：FABRIC_NETWORK_ERROR（exit=0）' : mode === 'degraded' ? '模拟采集超时' : null },
         warnings: configState === 'error' ? [longError] : [], errors: [],
       }

@@ -172,7 +172,7 @@ test('真实装配：模型目录只读，保存后状态与两种判读使用�
       const changed = await handler('config.set', { patch: { llm: { provider: 'second', model: 'shared-id' }, judge: { model: 'jev-preview' } } })
       assert.equal(changed.value.written, true)
       const disk = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8'))
-      assert.deepEqual(disk.llm, { provider: 'second', model: 'shared-id', temperature: 0.6, maxTokens: 200 })
+      assert.deepEqual(disk.llm, { provider: 'second', model: 'shared-id', temperature: 0.6 })
       assert.equal(disk.judge.model, 'jev-preview')
       await handler('judge.now', {})
       await handler('judge.now', { draft: '离线草稿，仅测试路由' })
@@ -262,4 +262,44 @@ test('真实装配：恢复窗口时采集失败会自动停止，并写盘阻�
 
     for (const effect of effects) effect.dispose()
   })
+})
+
+test('真实装配：开始与自动恢复都接入 CodeMaker 检查，失败不启动 POPO CLI', async () => {
+  for (const restore of [false, true]) {
+    await withTempHome(async home => {
+      const root = join(home, '.dsh', 'popo-watcher')
+      const groupDir = join(root, '1234567')
+      mkdirSync(groupDir, { recursive: true })
+      writeFileSync(join(root, 'config.json'), JSON.stringify({ group: '1234567', autoResume: restore }))
+      if (restore) writeFileSync(join(groupDir, 'state.json'), JSON.stringify({
+        startedAt: '2026-10-10 09:00:00', endsAt: '2099-10-10 09:00:00', stopped: false,
+      }))
+      let handler, checks = 0
+      const { ctx, effects } = makeCtx({
+        get: service => service === 'agentDefaultModel' ? { currentSelection: () => ({ provider: 'codemaker', model: 'fixture' }) }
+          : service === 'llm' ? {
+            listConfigurableProviders: () => [{ provider: 'codemaker', settingsNs: 'llm-fixture', settingsPath: ['providers', 'codemaker'] }],
+            discoverModels: async () => { checks++; throw new Error('fixture endpoint answered 503') },
+          } : service === 'settings' ? { describe: () => [{ ns: 'llm-fixture', value: { providers: {
+            codemaker: { baseURL: 'http://127.0.0.1:12345/v1', api: 'openai-responses' },
+          } } }] }
+            : service === 'subprocess' ? { spawn: () => assert.fail('检查失败不能启动 CLI') } : undefined,
+        inject: (_needs, callback) => callback({ connection: { rpc: { handle: (_channel, callback) => { handler = callback } } } }),
+      })
+      try {
+        plugin.apply(ctx, {})
+        if (restore) await new Promise(resolve => setTimeout(resolve, 20))
+        else assert.equal((await handler('start', { hours: 1 })).ok, false)
+        const state = (await handler('status', {})).value
+        assert.equal(checks, 1)
+        assert.equal(state.window.stopped, true)
+        assert.match(state.window.stoppedReason, /CodeMaker 接口检查失败.*HTTP 503/)
+        assert.equal(state.poll.running, false)
+        assert.equal(state.window.collectionError, null)
+        assert.equal(state.phase, 'idle')
+      } finally {
+        for (const effect of effects) effect.dispose()
+      }
+    })
+  }
 })

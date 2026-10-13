@@ -66,6 +66,19 @@ const CSS = `
   select.dsh-popo-input{max-width:100%;text-overflow:ellipsis}
   textarea.dsh-popo-input{resize:vertical}
   .dsh-popo-input[aria-invalid="true"]{border-color:var(--popo-danger)}
+  .dsh-popo-settings{display:flex;flex-direction:column;gap:24px}
+  .dsh-popo-setting-group{display:flex;flex-direction:column;gap:4px}
+  .dsh-popo-setting-group>.dsh-popo-title{padding-bottom:8px;margin-bottom:4px;border-bottom:1px solid var(--popo-line)}
+  .dsh-popo-setting-row{display:grid;grid-template-columns:minmax(0,1fr) 192px;align-items:center;gap:4px 16px;min-height:44px;padding:4px 0}
+  .dsh-popo-setting-row>label{display:flex;align-items:center;min-height:36px;overflow-wrap:anywhere;cursor:pointer}
+  .dsh-popo-setting-row>.dsh-popo-err{grid-column:1 / -1}
+  .dsh-popo-setting-control{display:flex;align-items:center;justify-content:flex-end;gap:12px}
+  .dsh-popo-setting-control input[type="checkbox"]{flex:none;width:18px;height:18px;margin:0;accent-color:var(--popo-primary);cursor:pointer}
+  .dsh-popo-setting-control input[type="checkbox"]:disabled{opacity:.55;cursor:default}
+  .dsh-popo-setting-input{display:flex;flex:1;align-items:stretch}
+  .dsh-popo-setting-input>.dsh-popo-input{border-top-right-radius:0;border-bottom-right-radius:0}
+  .dsh-popo-setting-unit{display:flex;flex:none;align-items:center;padding:0 8px;border:1px solid var(--dsw-alias-border-l4,#00000029);border-left:0;border-radius:0 8px 8px 0;background:var(--popo-panel);color:var(--popo-muted);white-space:nowrap}
+  .dsh-popo-setting-input:has(input:disabled)>.dsh-popo-setting-unit{opacity:.55}
   .dsh-popo-section,.dsh-popo-details{border-top:1px solid var(--popo-line);padding-top:14px}
   .dsh-popo-details{padding-top:0}
   .dsh-popo-details>summary{min-height:44px;padding:11px 0;cursor:pointer;overflow-wrap:anywhere}
@@ -100,6 +113,7 @@ const CSS = `
   @container popo (min-width:520px){.dsh-popo-form,.dsh-popo-detail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   @container popo (width < 520px){.dsh-popo-monitor{padding:12px}.dsh-popo-summary{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-areas:"collection sends" "updated updated"}.dsh-popo-detail-field{display:grid;grid-template-columns:78px minmax(0,1fr);gap:8px;align-items:start}}
   @container popo (width < 400px){.dsh-popo-sendbar{flex-direction:column;align-items:stretch;gap:8px}.dsh-popo-sendbar .dsh-popo-btn{align-self:flex-end}.dsh-popo-diagnostic-action{flex-wrap:wrap}.dsh-popo-diagnostic-action .dsh-popo-btn{margin-left:auto}}
+  @container popo (width < 400px){.dsh-popo-setting-row{grid-template-columns:minmax(0,1fr) min(144px,50%)}}
 `
 
 /**

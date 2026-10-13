@@ -147,6 +147,198 @@ function pollingClock() {
 
 const networkFailure = { ok: false, kind: 'upstream', code: 'FABRIC_NETWORK_ERROR', retryable: true, error: 'FABRIC_NETWORK_ERROR: ECONNRESET' }
 
+test('自动轮次忙碌时合并去重，空采集补判待处理消息，SKIP 后不反复重判', async t => {
+  const clock = pollingClock()
+  const first = { ...messages(1)[0], msgId: 'first', t_msg: clock.now().getTime() - 1, content: '第一条问题' }
+  let incoming = [first]
+  let release
+  const calls = []
+  const draft = { write: params => {
+    calls.push(params)
+    return calls.length === 1 ? new Promise(resolve => { release = resolve }) : Promise.resolve({ ok: true, text: 'SKIP' })
+  } }
+  const judge = judgeStub()
+  const transport = transportStub()
+  transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: incoming } })
+  const watcher = makeWatcher({ store: openWindow(), transport, judge, draft, now: clock.now, schedule: clock.schedule, config: { opening: { enabled: false } } })
+  t.after(() => watcher.dispose())
+  await watcher.startWindow()
+  await tick()
+  assert.equal(calls.length, 1)
+  const next = { ...first, msgId: 'next', t_msg: first.t_msg + 10, content: '第二条问题' }
+  const last = { ...first, msgId: 'last', t_msg: first.t_msg + 20, content: '第三条问题' }
+  incoming = [first, next, next, last]
+  await clock.next()
+  assert.equal(calls.length, 1, '忙碌期间不并行启动模型')
+  assert.deepEqual(watcher.status().value.pendingRound, { count: 2, retryAtMs: null })
+  release({ ok: true, text: 'SKIP' })
+  await tick()
+  await clock.next()
+  assert.equal(calls.length, 2)
+  assert.deepEqual(judge.rounds[1].conversation.filter(row => row.is_new).map(row => row.text), ['第二条问题', '第三条问题'])
+  assert.equal(watcher.status().value.pendingRound.count, 0)
+  await clock.next()
+  assert.equal(calls.length, 2)
+  assert.equal(transport.sends.length, 0)
+})
+
+test('待判批次最多保留最新 50 条，合并后所有保留消息都准确标新', async t => {
+  const clock = pollingClock()
+  const first = { ...messages(1)[0], msgId: 'initial', t_msg: clock.now().getTime() - 1 }
+  let incoming = [first], release, writes = 0
+  const judge = judgeStub()
+  const draft = { write: () => ++writes === 1 ? new Promise(resolve => { release = resolve }) : Promise.resolve({ ok: true, text: 'SKIP' }) }
+  const transport = transportStub()
+  transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: incoming } })
+  const watcher = makeWatcher({ store: openWindow(), transport, judge, draft, now: clock.now, schedule: clock.schedule, config: { opening: { enabled: false } } })
+  t.after(() => watcher.dispose())
+  await watcher.startWindow()
+  await tick()
+  incoming = Array.from({ length: 60 }, (_, index) => ({ ...first, msgId: `burst-${index}`, t_msg: first.t_msg + index + 1, content: `合成消息${index}` }))
+  await clock.next()
+  assert.equal(watcher.status().value.pendingRound.count, 50)
+  release({ ok: true, text: 'SKIP' })
+  await tick()
+  await clock.next()
+  const fresh = judge.rounds[1].conversation.filter(row => row.is_new)
+  assert.equal(fresh.length, 50)
+  assert.equal(fresh[0].text, '合成消息10')
+  assert.equal(fresh.at(-1).text, '合成消息59')
+  assert.equal(watcher.status().value.pendingRound.count, 0)
+})
+
+test('冷却期不启动模型，冷却结束后没有新消息也会补判且只发送一次', async t => {
+  const clock = pollingClock()
+  const now = clock.now().getTime()
+  const row = { ...messages(1)[0], msgId: 'cooldown', t_msg: now - 1 }
+  const store = openWindow({ lastSendEpochMs: now - 10_000 })
+  const transport = transportStub({ messages: [row] })
+  const draft = draftStub()
+  const judge = judgeStub()
+  const watcher = makeWatcher({ store, transport, judge, draft, now: clock.now, schedule: clock.schedule, config: { opening: { enabled: false } } })
+  t.after(() => watcher.dispose())
+  await watcher.startWindow()
+  await tick()
+  assert.equal(draft.calls.length, 0)
+  assert.equal(judge.rounds.length, 0)
+  assert.deepEqual(watcher.status().value.pendingRound, { count: 1, retryAtMs: now + 10_000 })
+  await clock.next()
+  assert.equal(transport.sends.length, 1)
+  assert.equal(draft.calls.length, 1)
+  assert.deepEqual(watcher.status().value.pendingRound, { count: 0, retryAtMs: null })
+  await clock.next()
+  assert.equal(transport.sends.length, 1)
+})
+
+test('最终发送守卫拒绝冷却时保留批次，补判会重新生成而非发送旧草稿', async t => {
+  const clock = pollingClock()
+  const row = { ...messages(1)[0], msgId: 'late-cooldown', t_msg: clock.now().getTime() - 1 }
+  const store = openWindow()
+  let writes = 0
+  const draft = { write: async () => {
+    writes++
+    if (writes === 1) store.json.set(`${DIR}/state.json`, { ...store.json.get(`${DIR}/state.json`), lastSendEpochMs: clock.now().getTime() })
+    return { ok: true, text: `合成草稿${writes}` }
+  } }
+  const transport = transportStub({ messages: [row] })
+  const watcher = makeWatcher({ store, transport, draft, now: clock.now, schedule: clock.schedule, config: { opening: { enabled: false } } })
+  t.after(() => watcher.dispose())
+  await watcher.startWindow()
+  await tick()
+  assert.equal(transport.sends.length, 0)
+  assert.equal(watcher.status().value.pendingRound.count, 1)
+  assert.equal(watcher.status().value.round.sendReason, 'too soon')
+  await clock.next()
+  assert.equal(writes, 2)
+  assert.deepEqual(transport.sends, [{ group: GROUP, text: '合成草稿2' }])
+})
+
+test('停止、静音、重开、换群、到期、采集故障与释放都会清空冷却中的旧批次', async t => {
+  for (const action of ['stop', 'mute', 'restart', 'group', 'expiry', 'failure', 'dispose', 'self']) await t.test(action, async t => {
+    const clock = pollingClock()
+    const now = clock.now().getTime()
+    const row = { ...messages(1)[0], msgId: 'pending', t_msg: now - 1 }
+    const store = openWindow({ lastSendEpochMs: now - 10_000 })
+    const transport = transportStub({ messages: [row] })
+    const draft = draftStub()
+    const watcher = makeWatcher({ store, transport, draft, now: clock.now, schedule: clock.schedule, config: { opening: { enabled: false } } })
+    t.after(() => watcher.dispose())
+    await watcher.startWindow({ hours: action === 'expiry' ? 0.001 : 1 })
+    await tick()
+    assert.equal(watcher.status().value.pendingRound.count, 1)
+    if (action === 'stop') await watcher.stop()
+    if (action === 'mute') await watcher.stop({ mode: 'mute' })
+    if (action === 'restart') await watcher.startWindow()
+    if (action === 'group') { await watcher.stop(); await watcher.updateConfig({ group: '7654321' }) }
+    if (action === 'dispose') watcher.dispose()
+    if (action === 'failure') { transport.search = async () => networkFailure; await clock.next() }
+    if (action === 'self') {
+      transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [row, { ...row, msgId: 'own-message', t_msg: now + 1, from: 'u-self' }] } })
+    }
+    if (['expiry', 'self', 'mute', 'restart'].includes(action)) await clock.next()
+    assert.deepEqual(watcher.status().value.pendingRound, { count: 0, retryAtMs: null })
+    if (action === 'failure') {
+      transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [row] } })
+      await clock.next()
+      assert.equal(watcher.status().value.pendingRound.count, 0)
+    }
+    assert.equal(draft.calls.length, 0)
+    assert.equal(transport.sends.length, 0)
+  })
+})
+
+test('取消忽略 signal 的慢模型也会释放队列，新窗口不会接收迟到草稿', async t => {
+  for (const action of ['stop', 'mute', 'restart', 'dispose', 'failure', 'expiry']) await t.test(action, async t => {
+    const clock = pollingClock()
+    const transport = transportStub()
+    let release, signal
+    const draft = { write: params => { signal = params.signal; return new Promise(resolve => { release = resolve }) } }
+    const watcher = makeWatcher({ store: openWindow(), transport, draft, now: clock.now, schedule: clock.schedule, config: { opening: { enabled: false } } })
+    t.after(() => { watcher.dispose(); release?.({ ok: true, text: '迟到结果' }) })
+    await watcher.startWindow({ hours: action === 'expiry' ? 0.001 : 1 })
+    const pending = watcher.runRound(messages())
+    let finished = false
+    pending.then(() => { finished = true })
+    await tick()
+    assert.equal(signal.aborted, false)
+    let control
+    if (action === 'stop') control = watcher.stop()
+    if (action === 'mute') control = watcher.stop({ mode: 'mute' })
+    if (action === 'restart') control = watcher.startWindow()
+    if (action === 'dispose') watcher.dispose()
+    if (action === 'failure') { transport.search = async () => networkFailure; await clock.next() }
+    if (action === 'expiry') await clock.next()
+    await tick()
+    assert.equal(signal.aborted, true)
+    assert.equal(finished, true, '不等待适配器响应取消，也不能继续占用串行队列')
+    assert.equal((await pending).verdict, 'cancelled')
+    if (control) assert.equal((await control).ok, true)
+    if (action !== 'dispose') assert.equal((await watcher.updateConfig({ dryRun: true })).ok, true)
+    release({ ok: true, text: '不应发送的旧草稿' })
+    await tick()
+    assert.equal(transport.sends.length, 0)
+  })
+})
+
+test('关闭 TypeSafe 的完整自动链路不调用判读或凭证，LLM 回复或 SKIP 后仍遵守守卫', async t => {
+  for (const text of ['合成技术回复', 'SKIP']) await t.test(text, async t => {
+    let calls = 0
+    const unexpected = () => { calls++; throw new Error('不得调用 TypeSafe') }
+    const transport = transportStub()
+    const watcher = makeWatcher({ store: openWindow(), transport, judge: { available: unexpected, runRound: unexpected, runDraft: unexpected }, draft: draftStub(text), config: { judge: { enabled: false } } })
+    t.after(() => watcher.dispose())
+    const result = await watcher.runRound(messages())
+    assert.equal(result.verdict, text === 'SKIP' ? 'quiet' : 'sent')
+    assert.equal(calls, 0)
+    assert.equal(transport.sends.length, text === 'SKIP' ? 0 : 1)
+    assert.equal(watcher.status().value.round.decisionSource, 'llm')
+    if (text !== 'SKIP') {
+      assert.equal((await watcher.runRound(messages())).send.reason, 'too soon')
+      assert.equal(transport.sends.length, 1)
+    }
+  })
+})
+
 test('只回复 @ 我：组合识别、混合 @、历史命中及失败均按本轮目标决定', async (t) => {
   const cases = [
     { name: '直接 @ 姓名', content: '@测试用户 请解释连接池？', speak: true },
@@ -387,10 +579,10 @@ test('网络恢复后，故障前仍在生成或判读的草稿也不能补发',
     transport.search = async () => ({ ok: true, value: { messages: [] } })
     await clock.next()
     assert.equal(watcher.status().value.poll.consecutiveFailures, 0)
-    release(stage === 'draft' ? { ok: true, text: '迟到草稿' } : { ok: true, answers: {} })
     const result = await round
-    assert.equal(result.verdict, 'send-blocked')
-    assert.equal(result.send.reason, 'collection stopped')
+    assert.equal(result.verdict, stage === 'draft' ? 'cancelled' : 'send-blocked')
+    if (stage === 'assessment') assert.equal(result.send.reason, 'round cancelled')
+    release(stage === 'draft' ? { ok: true, text: '迟到草稿' } : { ok: true, answers: {} })
     assert.equal(transport.sends.length, 0)
     assert.equal(watcher.status().value.window.stopped, false)
   }
@@ -410,8 +602,8 @@ test('慢草稿期间手动停止会立即停表，排队完成后也不发送�
   const stopping = watcher.stop()
   assert.equal(watcher.status().value.poll.running, false)
   assert.equal(clock.jobs[0].cancelled, true)
+  assert.equal((await round).verdict, 'cancelled')
   release({ ok: true, text: '不应发出的旧草稿' })
-  assert.equal((await round).verdict, 'send-blocked')
   assert.equal((await stopping).ok, true)
   assert.equal(transport.sends.length, 0)
   assert.equal(watcher.status().value.window.stopped, true)
@@ -487,10 +679,10 @@ test('正常采集后发生故障：立即关闭并拦住仍在生成或判读�
     assert.equal(watcher.status().value.window.stopped, true, '不能等慢判读结束才关闭开关')
     assert.equal(watcher.status().value.poll.running, false)
     assert.equal(scheduled.length, 1, '失败后不排下一轮')
-    release(stage === 'draft' ? { ok: true, text: '测试回复' } : { ok: true, answers: {} })
     const result = await round
-    assert.equal(result.verdict, 'send-blocked')
-    assert.equal(result.send.reason, 'collection stopped')
+    assert.equal(result.verdict, stage === 'draft' ? 'cancelled' : 'send-blocked')
+    if (stage === 'assessment') assert.equal(result.send.reason, 'round cancelled')
+    release(stage === 'draft' ? { ok: true, text: '测试回复' } : { ok: true, answers: {} })
     assert.equal(transport.sends.length, 0)
     assert.equal((await watcher.runRound(messages())).verdict, 'skipped')
     assert.equal((await watcher.sendNow({ manual: true, text: '手动仍可发' })).ok, true)
@@ -623,7 +815,7 @@ test('runRound：判读说有切口 → 写文案并真的发出去，round.json
   assert.equal(value.round.verdict, 'sent')
 })
 
-test('runRound：判读说没切口 / 拿不准 → 不发消息，只记 round.jsonl', async () => {
+test('runRound：判读明确说没切口 → 不发消息，只记 round.jsonl', async () => {
   const quietAnswers = {
     kind: { type: 'choice', choice: 'joke_or_tease', probabilities: { joke_or_tease: 0.3 }, confidence: 0.4 },
     addressed_to_us: { type: 'noul', noul: 0.1 },

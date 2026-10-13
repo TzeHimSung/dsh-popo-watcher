@@ -42,7 +42,7 @@ export function validateGroup(value: unknown): string | undefined   // 纯数字
 | `quietHours` | `{ enabled: false, start: '23:00', end: '09:00' }` | `HH:MM` |
 | `hourlyCap` | `{ enabled: false, max: 6 }` | 1..60 |
 | `judge` | `{ enabled: true, model: 'jev-latest', timeoutMs: 8000, unavailablePolicy: 'quiet', thresholds: <§6 默认> }` | unpaid: `unavailablePolicy ∈ {quiet, llm}` |
-| `llm` | `{ provider: '', model: '', temperature: 0.9, maxTokens: 200 }` | 空字符串 = 用 `ctx.agentDefaultModel` 的当前档 |
+| `llm` | `{ provider: '', model: '', temperature: 0.9 }` | 空字符串 = 用 `ctx.agentDefaultModel` 的当前档；不设置插件 token 预算，允许宿主补入模型上限。旧 `maxTokens` 读取时忽略，保存时移除 |
 | `prompt` | `{ system: <默认 prompt> }` | 1..4000 字 |
 | `popoCliJs` | `''` | 空 = 自动探测 |
 
@@ -144,8 +144,8 @@ export function createRound({ judgeClient, draftWriter, logger, now }): { plan(i
 ```js
 export function buildDraftPrompt({ conversation, ourRecent, guidance, maxChars, onlyReplyTargets? }): string
 export function createRound({ judgeClient, draftWriter, logger, now }): { plan(input): Promise<Plan> }
-// input = { messages, newCount, selfUid, sentMessages, config, questions, replyTargets?, selfDisplayName?, mentionReason? }
-// Plan   = { verdict: 'speak'|'quiet', view, judgement, draft, reason }
+// input = { messages, newCount, newMessageIds?, selfUid, sentMessages, config, questions, replyTargets?, selfDisplayName?, mentionReason?, signal? }
+// Plan   = { verdict: 'speak'|'quiet', view, judgement, draft, reason, decisionSource?, model?, finishReason?, cancelled? }
 ```
 
 顺序与纪律：
@@ -157,10 +157,11 @@ export function createRound({ judgeClient, draftWriter, logger, now }): { plan(i
 `replyTargets` 会补回上下文切片之外的本轮目标，只有这些目标标记为 `is_new`；判读使用当前显示名及回复范围，生成提示明确其余消息仅作背景。普通自动发送必须携带内部确认目标，公开 `sendNow` 传入同名字段不能豁免；开场白与手动发送不受此限制。关闭开关不增加搜索或用户信息调用。
 
 1. **机械层先跑**：`roundView()` 出 blocker（`noNewMessages` / `lastFromSelf` / `lastMessageHasNoText`），挡住就 `quiet` 且**不调判读**（不浪费请求）；
-2. **语义层**：`judgeClient.available()` → `runRound()` → `decideRound()` → `composeRoundView()`（只做加法，绝不放开机械 blocker）。判读不可用 → `judgeUnavailable` advisory；
-3. **写文案**只在两种情况下发生：判读说 `opening`；或判读整个不可用且 `judge.unavailablePolicy='llm'`。**判读可用但拿不准（judgeUnsure）一律安静**——插件里没有 agent 在环，错误闭嘴比错误发言便宜；
+2. **语义层**：启用 TypeSafe 时执行 `judgeClient.available()` → `runRound()` → `decideRound()` → `composeRoundView()`，机械 blocker 和明确拒绝不可绕过；不可用时增加 `judgeUnavailable` advisory 并遵循 `unavailablePolicy`。关闭 TypeSafe 则不调用其客户端、凭证或草稿审核，不将停用误报为不可用；
+3. **写文案**：TypeSafe 明确允许时生成；TypeSafe 不确定、已关闭或不可用且配置为 `llm` 时，由语言模型在一次调用中自行判断、生成和自检，仍可返回 `SKIP`。`decisionSource` 为 `typesafe` 或 `llm`；
 4. 文案为空 / `SKIP` / 文案层缺失或失败 → 一律 `quiet`；
-5. 本模块**不写盘、不发送、不碰 transport**（唯一写者是 watcher）；任何异常都退化成 `quiet`。
+5. `newMessageIds` 优先于按数量标新，合并批次中的待判消息在最近 50 条范围内保留，至少保留最近 14 条背景；已确认的 @ 目标仍可补回切片之外。`signal` 取消会立即结束等待，即使被调用方不响应取消也不能启动后续生成或发送；
+6. 本模块**不写盘、不发送、不碰 transport**（唯一写者是 watcher）；任何异常都退化成 `quiet`，取消额外返回 `cancelled:true`。
 
 ## 5.2 `lib/llm.js`（文案层：宿主 LLM 写一句话）
 
@@ -168,13 +169,15 @@ export function createRound({ judgeClient, draftWriter, logger, now }): { plan(i
 export const SKIP_MARKER = 'SKIP'
 export function isSkipLine(text): boolean         // 只认「skip」本体（含引号/句号/大小写）
 export function cleanDraft(text): string          // 取第一行、剥围栏与引号
-export function createDraftWriter({ getLlm, getRoute, logger, now, timeoutMs }): { available(), write({system, prompt, maxTokens}) }
+export function createDraftWriter({ getLlm, getRoute, logger, now }): { available(), write({system, prompt, temperature?, signal?}) }
 ```
 
-- 走宿主的 `llm` 服务：`llm.stream({ provider, model, messages, system, maxTokens, signal })`，只读 `text-delta`，必须收到 `finish/stop`；缺少结束标记、超时、中断或超过文本上限均失败。默认总超时 20s，通过共享 deadline 同时取消并结束等待；
+- 走宿主的 `llm` 服务：`llm.stream({ provider, model, messages, system, temperature?, signal })`，不传 `maxTokens`、不设置生成总时限，允许宿主适配器采用模型上限与连接/断流检测。旧 `write({maxTokens})` 参数同样忽略；
+- 只读 `text-delta`，必须收到 `finish/stop`；缺少结束标记、宿主超时、中断或超过正文收集上限均失败，不发送半句。`signal` 取消会立即结束等待并返回 `cancelled:true`；适配器迟到结果作废。CodeMaker 启动检查、模型目录读取及 TypeSafe 调用继续保留各自超时；
 - 消息形状照抄 `@deepseek-ai/dsh-llm` 的 `createUserMessage`（`{ id, role:'user', content:[{type:'text',text}], source:{kind:'plugin',plugin:'dsh-popo-watcher'} }`）——插件不能 import 那个包；
 - 路由：`resolveDraftRoute` 供生成调用和状态展示共用；配置 `llm.provider/model` 都非空时优先，缺任意一项则整组回落 `agentDefaultModel.currentSelection()`，返回 `source: 'plugin' | 'host'`；
 - `listDraftModels` 使用宿主 `llm.listProviders()` / `llm.listModels(provider)`，按提供方隔离错误，只返回目录显示字段；读取超时默认 8 秒。目录只服务选项展示，不改变调用路由；
+- `checkCodeMakerConnection({getRoute, getLlm, getSettings})` 返回 `{ok, error?}`，仅检查生效路由 `codemaker`。通过 `listConfigurableProviders()` 的命名空间/路径及 `settings.describe({redactSecrets:true})` 获取实时地址和协议，再调用宿主 `discoverModels(settingsNs, {provider, baseURL, api?}, signal)`，复用宿主凭证并实际请求模型列表；不能用本地目录代替网络检查。总超时 5 秒、无重试、无生成、无成功缓存；合法空列表也通过，不校验当前模型是否在列表中。错误仅返回去除 URL 凭证/查询参数的地址和分类原因，不返回凭证、请求头、完整响应或宿主原始错误；
 - **零 bare import、never-throw、不往 console 打日志**。
 
 ## 6. 默认阈值（`DEFAULT_THRESHOLDS`）
@@ -193,7 +196,8 @@ draftLeak .60 / draftWarn .50 / draftWarnLeak .40
 ```js
 // watcher.js
 export function createWatcher({ store, config, transport, judge, compose, logger, now, env,
-                                getTransport, schedule, autoRound, judgeClient, sender, draftWriter, keyResolver }): Watcher
+                                getTransport, schedule, autoRound, judgeClient, sender, draftWriter, keyResolver,
+                                getModelSelection, checkStartup }): Watcher
 // Watcher = { status(), checkCli(), getConfig({reload?}), updateConfig(patch), startWindow({hours}), stop({mode,reason}),
 //             resume(), sendNow({text, opening?, manual?}), judgeNow({draft?}), runRound(newMessages), messages(limit),
 //             sends(limit), log(limit), keyStatus(), setKey(key), clearKey(), importLegacy({from?}), dispose() }
@@ -202,6 +206,10 @@ export function createWatcher({ store, config, transport, judge, compose, logger
 // 重启后的 state.json.collectionError/collectionFailures/stoppedAt 仅作为 window 中的历史记录，
 // 不将新实例标为 degraded，不产生新的采集；显式重开清除旧窗口错误。
 // startWindow 重算窗口并等待首轮采集；成功才尝试开场白（守卫放行条件见 guards.js）。
+// startWindow 与符合恢复条件的 resume 必须先通过 checkStartup，之后才能创建窗口、启动采集或发送开场白。
+// 检查失败只保存停止标记和 stoppedReason，保留旧窗口时间、水位和发言记录；不归为采集故障，不自动重试。
+// 停止/卸载/更新的启动请求会作废在途检查，迟到的成功或失败均不能重新启动或覆盖停止原因。
+// start RPC 沿用原错误信封；运行详情显示 window.stoppedReason，页面重开及宿主重启后仍可查看。
 // 首轮可重试故障返回 ok:true/recovering:true，不发送或补发开场白；不可重试故障返回 ok:false。
 // poller.start() 为 Promise，调用方必须 await。
 // stop 支持 stop/mute；sendNow/judgeNow/runRound 都走内部串行队列，全部 never-throw。
@@ -212,6 +220,12 @@ export function createWatcher({ store, config, transport, judge, compose, logger
 // poll 快照增加 recovering:boolean、failureLimit:5、nextRetryAt:number|null（Unix 毫秒，重试请求执行时为 null）。
 // 重试期间停自动发言；递增故障序号让旧草稿失效，sender 提交前再次核对；在途回执记账保留最新停止标记。
 // 手动停止、卸载或窗口到期后不再请求；mute 仅停发言，采集仍遵守同一重试策略。
+// poller.onPollSuccess(messages) 在消息和水位成功保存后调用，包括空批次；原 onMessages 仍只在有新消息时调用。
+// 自动调度最多一轮执行中、一个按 msgId 合并的待判批次（最新 50 条）；忙碌/冷却不消费批次，不另建补判定时器。
+// 下一次成功采集后检查冷却并重新判读；最终守卫 too soon 时归还消息，不缓存/补发草稿；SKIP 等终态消费本批。
+// 停止、静音、重开、换群、采集故障、到期或释放会取消在途自动判断并清空旧批次。已提交的发送仍等待回执并正确记账。
+// status.value.pendingRound = { count:number, retryAtMs:number|null }；retryAtMs 是冷却结束边界，实际在其后一次成功采集补判。
+// round.jsonl 及最近轮次快照记录 decisionSource/model/finishReason/sendReason；流水还保存判读分数和原因，本地日志按时间合并。
 
 // rpc.js
 export const CHANNEL = '/popo-watcher'
@@ -284,7 +298,7 @@ RPC 结果信封：`{ ok:true, value }` / `{ ok:false, error:{ code, message, de
 | `popo` | `spawn`（假句柄：`collected`/`done`/`terminate`）、`resolve`、`now` | `test/fixtures/popo-search.json`（保持响应结构的合成样本） |
 | `judge` | `fetchImpl`、`getKey`、`now` | 内联合成答案（`test/judge-policy.test.js`） |
 | `round` | `judgeClient`、`draftWriter`、`now` | 内联合成答案 + 桩文案层（`test/round.test.js`） |
-| `llm` | `getLlm`（假 `stream()` 异步生成器）、`getRoute`、`now`、`timeoutMs` | 无（chunk 形状按 `@deepseek-ai/dsh-llm` 的 `text-delta`/`finish` 手写） |
+| `llm` | `getLlm`（假 `stream()` 异步生成器）、`getRoute`、`now`、调用方 `signal` | 假时钟验证超过 20 秒仍正常完成；忽略取消的桩验证立即释放；Desktop 适配器使用本地 HTTP 截获宿主补入的上限 |
 | `client` | 注入 `window/document/MutationObserver`、React hooks 与定时器；浏览器预览加载实际组件及 Desktop 的 React/主题 | `test/fixtures/ui-preview.html`，通过 `node tools/preview-ui.mjs` 启动 |
 | `watcher` / `poller` | `store`/`getTransport`/`judgeClient`/`draftWriter`/`now`/`schedule` 全桩；`test/watcher-round.test.js` 里用**真的** sender+guards+poller，只桩三处外部世界（传输/判读/文案） | 无 |
 | `key-source` / watcher 的 key 接口 | `env`、`file`、`readJson` 注入；watcher 用 `keyResolver` 桩（不读本机注册表） | 临时目录里的真 `secret.json` |

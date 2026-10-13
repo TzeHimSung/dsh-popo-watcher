@@ -1,4 +1,4 @@
-import { clip, generationModelText } from './runtime.js'
+import { clip, generationModelText, replyStatusText } from './runtime.js'
 import { callRpc } from './rpc.js'
 export function createOverview(React, { noteLine, useLifetime, useActionFocus }) {
   const h = React.createElement
@@ -24,6 +24,7 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
       ]) : null,
       h('dl', { className: 'dsh-popo-summary', key: 'summary', 'aria-label': state.phase === 'error' ? '运行摘要（缓存）' : '运行摘要' }, summary.map(([id, label, text]) => h('div', { key: id, 'data-stat': id }, [h('dt', { className: 'dsh-popo-k' }, label), h('dd', { className: 'dsh-popo-v' }, text)]))),
       props.view.retryText ? h('p', { className: 'dsh-popo-note', key: 'retry-at' }, props.view.retryText) : null,
+      state.value ? h('p', { className: 'dsh-popo-note', key: 'reply-status', role: 'status', 'aria-label': '自动回复状态' }, replyStatusText(value)) : null,
       collectionError ? noteLine({ key: 'collection-error', tone: props.view.recovering ? 'warn' : 'bad', text: collectionError }) : null,
       state.value && !value.selfUid ? h('p', { className: 'dsh-popo-note', key: 'identity' }, '尚未识别本账号，自动发言暂不可用。') : null,
     ])
@@ -40,7 +41,11 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
       ['上次发言', sends.lastSendAt ?? '—'],
       ['上次内容', clip(sends.lastSendContent, 120)],
     ]
-    if (value.round) activity.push(['最近判读', `${value.round.at ?? '—'} ${value.round.verdict ?? '—'}：${value.round.reason ?? '—'}`])
+    if (win.stopped === true && win.stoppedReason) activity.push(['停止原因', win.stoppedReason])
+    if (value.round) activity.push(['最近判读', `${value.round.at ?? '—'} ${replyStatusText({ round: value.round })}`])
+    if (value.round?.decisionSource) activity.push(['判断来源', value.round.decisionSource === 'llm' ? '生成模型自行判断' : 'TypeSafe'])
+    if (value.round?.model) activity.push(['本轮生成模型', value.round.model])
+    if (value.round?.finishReason) activity.push(['生成结束原因', value.round.finishReason])
     if (Array.isArray(value.errors) && value.errors.length) activity.push(['最近错误', value.errors.map(entry => `${entry?.at ?? ''} ${entry?.message ?? ''}`).join('\n')])
     const groups = [
       ['runtime', '运行信息', [
@@ -48,11 +53,13 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
         ['本账号', value.selfUid || '尚未识别'],
         ['窗口截止', win.endsAt ?? '—'],
         ['轮询', `${poll.intervalSec ?? '—'} 秒/次 · 累计采集 ${poll.watchedMsgs ?? '—'} 条\n滞后 ${poll.lagSec ?? '—'} 秒`],
+        ['待判消息', value.pendingRound ? `${value.pendingRound.count} 条` : '—'],
         ['传输', value.transport?.ok === true ? '可用' : `不可用：${value.transport?.error ?? '未接入'}`],
       ]],
       ['models', '模型与发送', [
-        ['判读', judge.enabled === true ? `${judge.model ?? '—'}\n不可用时${judge.unavailablePolicy === 'llm' ? '交给模型' : '保持静默'}` : '未启用'],
+        ['判读', judge.enabled === true ? `${judge.model ?? '—'}\n不确定时交给生成模型复核；不可用时${judge.unavailablePolicy === 'llm' ? '交给模型' : '保持静默'}` : '由生成模型自行判断'],
         ['生成模型', generationModelText(llm)],
+        ['生成上限', '使用宿主模型上限'],
         ['自动发送演练', value.dryRun === true ? '已开启，自动消息不发送' : '未开启'],
         ['持久化', value.persistence?.ok === false ? value.persistence.error || '异常，自动监控已暂停' : '正常'],
       ]],
@@ -138,6 +145,8 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
     const win = snapshot.value?.window ?? {}
     const poll = snapshot.value?.poll ?? {}
     const view = props.view
+    const duplicateCollectionError = snapshot.phase === 'ready' && Boolean(view.collectionError)
+      && (note?.errorText === view.collectionError || note?.errorText === `采集失败，已自动停止：${view.collectionError}`)
     const validHours = hours.trim() !== '' && Number.isFinite(Number(hours)) && Number(hours) >= 1 && Number(hours) <= 720
     const blocked = props.blocked || (snapshot.phase !== 'ready' ? '请先确认运行状态。' : '')
     const monitoring = poll.running === true || (win.active === true && win.stopped !== true)
@@ -158,6 +167,10 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
       : `${hoursOverride === null ? (props.configState === 'saved' ? '使用已保存默认时长' : '使用当前默认时长') : '本次临时时长，不修改默认配置'} · ${props.openingEnabled ? '开始时自动打招呼' : '自动打招呼已关闭'}`
 
     React.useEffect(() => { focusAfterAction.current = null; setHours(null); setBusy(null); setNote(null) }, [connection])
+    React.useEffect(() => {
+      // 状态区接管同一错误后清掉临时反馈，避免采集恢复后旧错误再次出现。
+      if (duplicateCollectionError) setNote(null)
+    }, [duplicateCollectionError])
     React.useEffect(() => {
       if (busy !== null) return
       const button = focusAfterAction.current
@@ -180,7 +193,7 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
       if (result.ok !== true) {
         token.busy = false
         setBusy(null)
-        setNote({ tone: 'bad', text: `${label}失败：${result.text}` })
+        setNote({ tone: 'bad', text: `${label}失败：${result.text}`, errorText: result.text })
         onDone?.()
         return
       }
@@ -284,7 +297,7 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
         h('p', { className: 'dsh-popo-note dsh-popo-remaining', 'aria-label': '本轮时间' }, view.remaining),
       ]),
       h('p', { className: 'dsh-popo-note', key: 'tip' }, hint),
-      (note?.recovering && !view.recovering) || (view.collectionError && note?.tone !== 'bad' && !note?.recovering) ? null : noteLine(note),
+      duplicateCollectionError || (note?.recovering && !view.recovering) || (view.collectionError && note?.tone !== 'bad' && !note?.recovering) ? null : noteLine(note),
       blocked && !shouldStop ? h('p', { className: 'dsh-popo-note', key: 'blocked' }, blocked) : null,
       !validHours && hoursOverride !== null ? h('p', { className: 'dsh-popo-err', role: 'alert', key: 'invalid' }, '本次时长需在 1–720 小时之间。') : null,
     ])

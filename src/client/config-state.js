@@ -6,7 +6,7 @@ export const CONFIG_FIELDS = [
   { key: 'maxChars', path: 'maxChars', label: '自动发送长度提醒（字）', type: 'number', min: 10, max: 500 },
   { key: 'hardMaxChars', path: 'hardMaxChars', label: '自动发送长度上限（字）', type: 'number', min: 20, max: 1000 },
   { key: 'dryRun', path: 'dryRun', label: '自动发送仅演练', type: 'checkbox' },
-  { key: 'judgeEnabled', path: 'judge.enabled', label: '自动回复启用判读', type: 'checkbox' },
+  { key: 'judgeEnabled', path: 'judge.enabled', label: '使用 TypeSafe 判读', type: 'checkbox' },
   { key: 'hourlyCapEnabled', path: 'hourlyCap.enabled', label: '限制自动发送每小时条数', type: 'checkbox' },
   { key: 'hourlyCapMax', path: 'hourlyCap.max', label: '自动发送每小时最多条数', type: 'number', min: 1, max: 60, enabledBy: 'hourlyCapEnabled' },
   { key: 'openingEnabled', path: 'opening.enabled', label: '开始监控后自动打招呼', type: 'checkbox' },

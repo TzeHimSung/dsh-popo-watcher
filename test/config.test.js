@@ -15,6 +15,20 @@ import { DEFAULTS, applyPatch, defaultConfig, normalizeConfig, validateGroup } f
 /** DEFAULTS 的快照：跑完所有用例后要对拍，证明常量没被改到。 */
 const DEFAULTS_SNAPSHOT = JSON.parse(JSON.stringify(DEFAULTS))
 
+test('旧 maxTokens 配置被忽略，保存任何 patch 都不重新引入插件预算', () => {
+  const legacy = { ...defaultConfig(), llm: { provider: 'codemaker', model: 'fixture', temperature: 0.4, maxTokens: 200 } }
+  const normalized = normalizeConfig(legacy)
+  assert.deepEqual(normalized.config.llm, { provider: 'codemaker', model: 'fixture', temperature: 0.4 })
+  assert.deepEqual(normalized.warnings, [])
+  for (const maxTokens of [16, 1024, 4096, null, 'unlimited']) {
+    const saved = applyPatch(legacy, { llm: { maxTokens } }).config
+    assert.equal(Object.hasOwn(saved.llm, 'maxTokens'), false)
+    assert.equal(saved.llm.model, 'fixture')
+    assert.equal(saved.llm.temperature, 0.4)
+  }
+  assert.equal(Object.hasOwn(defaultConfig().llm, 'maxTokens'), false)
+})
+
 /** 契约里的顶层字段清单，逐字段比对用。 */
 const FIELDS = [
   'group',
