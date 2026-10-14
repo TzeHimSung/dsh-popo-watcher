@@ -142,7 +142,7 @@ export function createRound({ judgeClient, draftWriter, logger, now }): { plan(i
 ### 5.1 `lib/round.js`（一轮的编排：判读 → 结论 → 文案）
 
 ```js
-export function buildDraftPrompt({ conversation, ourRecent, guidance, maxChars, onlyReplyTargets? }): string
+export function buildDraftPrompt({ conversation, ourRecent, guidance, maxChars, onlyReplyTargets?, selfDisplayName? }): string
 export function createRound({ judgeClient, draftWriter, logger, now }): { plan(input): Promise<Plan> }
 // input = { messages, newCount, newMessageIds?, selfUid, sentMessages, config, questions, replyTargets?, selfDisplayName?, mentionReason?, signal? }
 // Plan   = { verdict: 'speak'|'quiet', view, judgement, draft, reason, decisionSource?, model?, finishReason?, cancelled? }
@@ -159,7 +159,8 @@ export function createRound({ judgeClient, draftWriter, logger, now }): { plan(i
 1. **机械层先跑**：`roundView()` 出 blocker（`noNewMessages` / `lastFromSelf` / `lastMessageHasNoText`），挡住就 `quiet` 且**不调判读**（不浪费请求）；
 2. **语义层**：启用 TypeSafe 时执行 `judgeClient.available()` → `runRound()` → `decideRound()` → `composeRoundView()`，机械 blocker 和明确拒绝不可绕过；不可用时增加 `judgeUnavailable` advisory 并遵循 `unavailablePolicy`。关闭 TypeSafe 则不调用其客户端、凭证或草稿审核，不将停用误报为不可用；
 3. **写文案**：TypeSafe 明确允许时生成；TypeSafe 不确定、已关闭或不可用且配置为 `llm` 时，由语言模型在一次调用中自行判断、生成和自检，仍可返回 `SKIP`。`decisionSource` 为 `typesafe` 或 `llm`；
-4. 文案为空 / `SKIP` / 文案层缺失或失败 → 一律 `quiet`；
+   生成提示保留 `is_our_account`，以 `[自己]` 标记当前账号的消息；显示名优先使用已确认的 `selfDisplayName`，否则从同一 `selfUid` 的上下文消息中提取，不按同名猜身份。自然闲聊优先回应提问、接话与玩笑，不要求新增技术信息；个人经历缺少依据时可谈一般看法或追问，不能编造。
+4. 文案为空 / `SKIP` / 文案层缺失或失败 → 一律 `quiet`；生成失败额外透传 `retryable`、`errorCode`、`retryAfterMs`，由 watcher 决定补试或停止；
 5. `newMessageIds` 优先于按数量标新，合并批次中的待判消息在最近 50 条范围内保留，至少保留最近 14 条背景；已确认的 @ 目标仍可补回切片之外。`signal` 取消会立即结束等待，即使被调用方不响应取消也不能启动后续生成或发送；
 6. 本模块**不写盘、不发送、不碰 transport**（唯一写者是 watcher）；任何异常都退化成 `quiet`，取消额外返回 `cancelled:true`。
 
@@ -174,6 +175,7 @@ export function createDraftWriter({ getLlm, getRoute, logger, now }): { availabl
 
 - 走宿主的 `llm` 服务：`llm.stream({ provider, model, messages, system, temperature?, signal })`，不传 `maxTokens`、不设置生成总时限，允许宿主适配器采用模型上限与连接/断流检测。旧 `write({maxTokens})` 参数同样忽略；
 - 只读 `text-delta`，必须收到 `finish/stop`；缺少结束标记、宿主超时、中断或超过正文收集上限均失败，不发送半句。`signal` 取消会立即结束等待并返回 `cancelled:true`；适配器迟到结果作废。CodeMaker 启动检查、模型目录读取及 TypeSafe 调用继续保留各自超时；
+- 生成失败结果增加 `retryable:boolean`、`errorCode:string`、`retryAfterMs:number|null`，保留原字段。优先读取宿主 `failure/code/status/providerRetryAfterMs`；连接、超时、限流、服务端错误、空响应和意外断流可重试。认证、配置、额度错误不可恢复；未知错误不循环。错误与日志仅含分类摘要，不记录凭据或完整错误响应；
 - 消息形状照抄 `@deepseek-ai/dsh-llm` 的 `createUserMessage`（`{ id, role:'user', content:[{type:'text',text}], source:{kind:'plugin',plugin:'dsh-popo-watcher'} }`）——插件不能 import 那个包；
 - 路由：`resolveDraftRoute` 供生成调用和状态展示共用；配置 `llm.provider/model` 都非空时优先，缺任意一项则整组回落 `agentDefaultModel.currentSelection()`，返回 `source: 'plugin' | 'host'`；
 - `listDraftModels` 使用宿主 `llm.listProviders()` / `llm.listModels(provider)`，按提供方隔离错误，只返回目录显示字段；读取超时默认 8 秒。目录只服务选项展示，不改变调用路由；
@@ -213,19 +215,26 @@ export function createWatcher({ store, config, transport, judge, compose, logger
 // 首轮可重试故障返回 ok:true/recovering:true，不发送或补发开场白；不可重试故障返回 ok:false。
 // poller.start() 为 Promise，调用方必须 await。
 // stop 支持 stop/mute；sendNow/judgeNow/runRound 都走内部串行队列，全部 never-throw。
-// 采集前后调用 shouldStop()；可重试故障最多连续失败 5 次（包含首轮），成功即清零。
-// 20 秒间隔下等待 40/80/160/300 秒后重试；不可重试故障立即停止。
+// 采集前后调用 shouldStop()；可重试故障持续退避，无次数上限，成功即清零并记录恢复。
+// 20 秒间隔下等待 40/80/160/300 秒后重试，之后保持 300 秒；不可重试故障立即停止。
 // 停止时保存 stopped/stoppedAt/stoppedReason/collectionError/collectionFailures，重启不恢复已停止窗口。
 // 落盘失败也立即在内存停用，并记录错误；采集写盘失败不推进水位；远端已确认发送的计数在内存保留。
-// poll 快照增加 recovering:boolean、failureLimit:5、nextRetryAt:number|null（Unix 毫秒，重试请求执行时为 null）。
+// poll 快照增加 recovering:boolean、failureLimit:null（无次数上限）、nextRetryAt:number|null（Unix 毫秒，重试请求执行时为 null）。
 // 重试期间停自动发言；递增故障序号让旧草稿失效，sender 提交前再次核对；在途回执记账保留最新停止标记。
 // 手动停止、卸载或窗口到期后不再请求；mute 仅停发言，采集仍遵守同一重试策略。
 // poller.onPollSuccess(messages) 在消息和水位成功保存后调用，包括空批次；原 onMessages 仍只在有新消息时调用。
 // 自动调度最多一轮执行中、一个按 msgId 合并的待判批次（最新 50 条）；忙碌/冷却不消费批次，不另建补判定时器。
-// 下一次成功采集后检查冷却并重新判读；最终守卫 too soon 时归还消息，不缓存/补发草稿；SKIP 等终态消费本批。
-// 停止、静音、重开、换群、采集故障、到期或释放会取消在途自动判断并清空旧批次。已提交的发送仍等待回执并正确记账。
-// status.value.pendingRound = { count:number, retryAtMs:number|null }；retryAtMs 是冷却结束边界，实际在其后一次成功采集补判。
-// round.jsonl 及最近轮次快照记录 decisionSource/model/finishReason/sendReason；流水还保存判读分数和原因，本地日志按时间合并。
+// 下一次成功采集后检查冷却与模型退避并重新判读；too soon 保留消息，不缓存/补发草稿；SKIP 等终态消费本批。
+// 模型临时失败后等待 20/40/60 秒，之后保持 60 秒；尊重更长 retryAfterMs。新消息合并但不重置退避。
+// 采集临时故障取消在途判断并保留消息，恢复后重读上下文；移出最新 50 条的旧消息被淘汰，不另设时间期限。
+// 停止、静音、重开、换群、到期、不可恢复故障或释放会清空批次和重试。窗口失效与请求失效分别校验。
+// sender 进入 transport.send 前设置 submitted:true；任何已提交批次都不重放，回执不明、超时或记账失败也不重发。
+// status.value.pendingRound = { count, retryAtMs, retryKind, retryAttempt, lastError, inFlight }。
+// count 包含当前在途批次；retryKind 为 model/collection/cooldown/null，retryAttempt 为当前故障链的失败次数。
+// retryAtMs 为采集、模型和冷却的最晚等待边界，实际在其后一次成功采集补判；lastError 为分类摘要或采集摘要。
+// 重试只保存在进程内，重启遵守既有 autoResume，不持久化任务队列。
+// round.jsonl 及最近轮次快照记录 decisionSource/model/finishReason/sendReason/retryable/errorCode/retryAfterMs/retryAttempt/retryRecovered。
+// 页面区分模型重试、等待采集恢复、等待冷却和需要处理的错误，并展示次数及重试时间；旧快照仍可读。
 
 // rpc.js
 export const CHANNEL = '/popo-watcher'

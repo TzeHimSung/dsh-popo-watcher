@@ -186,7 +186,8 @@ test('write：模型中断（finish 不是 stop）算失败，不把半句话交
 
   assert.equal(result.ok, false)
   assert.match(result.error, /模型中断/)
-  assert.match(result.error, /quota exceeded/)
+  assert.equal(result.errorCode, 'QUOTA_EXCEEDED')
+  assert.equal(result.retryable, false)
   // 半句话只作为诊断字段留在 raw 里
   assert.equal(result.raw, '半句话')
 })
@@ -212,7 +213,8 @@ test('write：流里抛错、服务取用抛错都只返回失败，绝不抛', 
   const writer = createDraftWriter({ getLlm: () => throwing, getRoute: () => ROUTE })
   const result = await writer.write({ prompt: 'P' })
   assert.equal(result.ok, false)
-  assert.match(result.error, /socket hang up/)
+  assert.equal(result.errorCode, 'TRANSPORT')
+  assert.equal(result.retryable, true)
 
   const hostile = createDraftWriter({
     getLlm: () => { throw new Error('ctx.get 炸了') },
@@ -242,6 +244,51 @@ test('write：超过 20 秒仍允许正常完成，插件不设置总时限', as
   assert.equal(result.ok, true)
   assert.equal(result.text, '完整回复')
   assert.equal(result.finishReason, 'stop')
+})
+
+test('模型错误保留宿主分类和等待提示，未知或永久错误不重试且不泄露响应', async t => {
+  const cases = [
+    [{ code: 'TRANSPORT' }, 'TRANSPORT', true],
+    [{ code: 'TIMEOUT' }, 'TIMEOUT', true],
+    [{ code: 'RATE_LIMIT', providerRetryAfterMs: 125000 }, 'RATE_LIMIT', true, 125000],
+    [{ code: 'SERVER' }, 'SERVER', true],
+    [{ code: 'AUTH' }, 'AUTH', false],
+    [{ code: 'INVALID_CREDENTIAL' }, 'INVALID_CREDENTIAL', false],
+    [{ code: 'MISSING_CREDENTIAL' }, 'MISSING_CREDENTIAL', false],
+    [{ code: 'MODEL_NOT_FOUND' }, 'MODEL_NOT_FOUND', false],
+    [{ code: 'NO_ADAPTER' }, 'MODEL_NOT_FOUND', false],
+    [{ code: 'INVALID_CONFIG' }, 'INVALID_REQUEST', false],
+    [{ code: 'ACCOUNT_QUOTA' }, 'QUOTA_EXCEEDED', false],
+    [{ code: 'INVALID_REQUEST' }, 'INVALID_REQUEST', false],
+    [{ code: 'QUOTA_EXCEEDED', status: 429 }, 'QUOTA_EXCEEDED', false],
+    [{ code: 'CONTEXT_WINDOW_EXCEEDED' }, 'CONTEXT_WINDOW_EXCEEDED', false],
+    [{ status: 503 }, 'SERVER', true],
+    [{ status: 403 }, 'AUTH', false],
+    [{ status: 429 }, 'RATE_LIMIT', true],
+    [{ code: 'something-new' }, 'UNKNOWN', false],
+  ]
+  for (const [failure, code, retryable, delay = null] of cases) await t.test(code + JSON.stringify(failure), async () => {
+    const logs = []
+    const llm = fakeLlm([{ type: 'finish', reason: { kind: 'error', failure: { ...failure, message: 'private-response sk-fixture-secret' } } }])
+    const writer = createDraftWriter({ getLlm: () => llm, getRoute: () => ROUTE, logger: line => logs.push(line) })
+    const result = await writer.write({ prompt: 'P' })
+    assert.equal(result.errorCode, code)
+    assert.equal(result.retryable, retryable)
+    assert.equal(result.retryAfterMs, delay)
+    assert.doesNotMatch(JSON.stringify([result, logs]), /private-response|sk-fixture-secret/)
+  })
+  for (const [error, code] of [[new Error('Connection error'), 'TRANSPORT'], [new Error('wrapper', { cause: { code: 'ECONNRESET' } }), 'TRANSPORT'], [Object.assign(new Error('read stalled'), { code: 'ETIMEDOUT' }), 'TIMEOUT']]) {
+    const writer = createDraftWriter({ getLlm: () => ({ stream: async function* () { throw error } }), getRoute: () => ROUTE })
+    const result = await writer.write({ prompt: 'P' })
+    assert.equal(result.errorCode, code)
+    assert.equal(result.retryable, true)
+  }
+  for (const chunks of [[], [{ type: 'text-delta', text: '未完成' }], [{ type: 'finish', reason: 'stop' }]]) {
+    const writer = createDraftWriter({ getLlm: () => fakeLlm(chunks), getRoute: () => ROUTE })
+    const result = await writer.write({ prompt: 'P' })
+    assert.equal(result.retryable, true)
+    assert.ok(['STREAM_CLOSED', 'EMPTY_RESPONSE'].includes(result.errorCode))
+  }
 })
 
 test('write：取消立即返回，忽略取消的适配器迟到输出不会变成成功', async () => {

@@ -11,13 +11,15 @@ The plugin targets **DSH 0.2.x**. Its settings interface is currently in Chinese
 - Start or stop a monitoring window from **Settings → POPO自动水群**. A fresh installation stays idle until you configure a group and start it.
 - When the effective generation provider is CodeMaker, starting or resuming monitoring first checks its live model-listing endpoint using the host's current configuration and credentials. A failed check or five-second timeout leaves monitoring stopped and shows the reason; retry by starting it again after fixing the endpoint. This checks connectivity without generating text.
 - Use TypeSafe to judge conversations and drafts, or disable it and let DSH's language model decide whether to reply and draft the response in one call. Uncertain TypeSafe judgments also go to the language model; explicit rejections remain final. Select both models independently or follow the host's default generation model.
+- The language model favors natural replies to questions, follow-ups, and jokes directed at the current account. Its prompt identifies that account and marks its messages; a reply need not add technical information, while closed conversations can still return `SKIP`.
 - Generation uses the host's model limits with no plugin token budget or overall generation deadline. The host still handles connection and stream failures; stopping monitoring cancels generation and releases the queue.
 - Merge new messages received while busy or cooling down into one bounded batch. After cooldown, the next successful poll re-evaluates the latest context, even when no new messages arrive.
 - Configure the prompt, opening message, duration, polling interval, reply length, quiet hours, hourly cap, and automatic dry run.
 - Enable **只回复 @ 我的消息** in Overview to consider automatic replies only to new messages mentioning the current account. The switch defaults to off and saves immediately; opening messages and manual sends keep their existing behavior.
 - View recent group messages and local send, judgment, and round records.
 - Send a manually written message to the saved target group, including while monitoring is stopped.
-- Retry transient collection failures with backoff; stop after five consecutive failures. Authentication errors, missing CLI, invalid responses, and persistence failures stop monitoring immediately.
+- Retry transient model failures after 20, 40, then 60 seconds, continuing at 60 seconds (or the host's longer retry hint). The next successful poll retries pending messages with fresh context, even without new messages. Collection failures use exponential backoff up to 300 seconds with no attempt limit; recovery resets the counter.
+- Authentication, model configuration, exhausted quota, missing CLI, invalid collection responses, and persistence failures stop monitoring. Unknown model errors, `SKIP`, rejected or truncated drafts do not loop. Once a send is submitted, its batch is never replayed, including when the receipt is uncertain or accounting fails.
 - Import existing watcher history from an explicitly selected directory without starting monitoring.
 
 ```text

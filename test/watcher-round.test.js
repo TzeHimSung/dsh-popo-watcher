@@ -15,6 +15,7 @@ import { test } from 'node:test'
 import { createWatcher } from '../lib/watcher.js'
 import { defaultConfig } from '../lib/config.js'
 import { createRpcHandler } from '../lib/rpc.js'
+import { createDraftWriter } from '../lib/llm.js'
 
 const ROOT = 'C:/fake/.dsh/popo-watcher'
 const GROUP = '1234567'
@@ -146,6 +147,187 @@ function pollingClock() {
 }
 
 const networkFailure = { ok: false, kind: 'upstream', code: 'FABRIC_NETWORK_ERROR', retryable: true, error: 'FABRIC_NETWORK_ERROR: ECONNRESET' }
+const pendingState = (fields = {}) => ({ count: 0, retryAtMs: null, retryKind: null, retryAttempt: 0, lastError: null, inFlight: false, ...fields })
+
+function autoFixture(t, { draft, config = {} } = {}) {
+  const clock = pollingClock()
+  const row = { ...messages(1)[0], msgId: 'retry-message', t_msg: clock.now().getTime() - 1, content: '合成问题，请接话' }
+  const store = openWindow()
+  const transport = transportStub({ messages: [row] })
+  const watcher = makeWatcher({ store, transport, draft, now: clock.now, schedule: clock.schedule,
+    config: { opening: { enabled: false }, judge: { enabled: false }, ...config } })
+  t.after(() => watcher.dispose())
+  return { clock, row, store, transport, watcher }
+}
+
+test('真实文案层连接错误超过五次，20/40/60 秒持续补试，无新消息也只提交一次', async t => {
+  let attempts = 0
+  const draft = createDraftWriter({ getRoute: () => ({ provider: 'mock', model: 'mock' }), getLlm: () => ({
+    stream: async function* () {
+      if (++attempts <= 7) throw new Error('Connection error')
+      yield { type: 'text-delta', text: '恢复后的完整回复' }
+      yield { type: 'finish', reason: 'stop' }
+    },
+  }) })
+  const { watcher, clock, transport, store } = autoFixture(t, { draft })
+  await watcher.startWindow()
+  await tick()
+  for (const [index, delay] of [20_000, 40_000, 60_000, 60_000, 60_000, 60_000, 60_000].entries()) {
+    const pending = watcher.status().value.pendingRound
+    assert.equal(pending.retryKind, 'model')
+    assert.equal(pending.retryAttempt, index + 1)
+    assert.equal(pending.retryAtMs - clock.now().getTime(), delay)
+    assert.equal(pending.count, 1)
+    const before = attempts
+    do { await clock.next() } while (clock.now().getTime() < pending.retryAtMs)
+    assert.equal(attempts, before + 1)
+  }
+  assert.equal(attempts, 8)
+  assert.deepEqual(watcher.status().value.pendingRound, pendingState())
+  assert.deepEqual(transport.sends, [{ group: GROUP, text: '恢复后的完整回复' }])
+  assert.equal(store.jsonl.get(`${DIR}/round.jsonl`).at(-1).retryRecovered, true)
+  await clock.next()
+  assert.equal(transport.sends.length, 1)
+  assert.equal(attempts, 8)
+})
+
+test('宿主更长等待不被新消息重置，恢复时重读上下文并允许 SKIP 消费批次', async t => {
+  const prompts = []
+  const draft = { write: async params => {
+    prompts.push(params.prompt)
+    return prompts.length === 1 ? { ok: false, error: 'RATE_LIMIT', errorCode: 'RATE_LIMIT', retryable: true, retryAfterMs: 120_000 }
+      : { ok: true, text: 'SKIP', finishReason: 'stop' }
+  } }
+  const { watcher, clock, transport, row } = autoFixture(t, { draft })
+  await watcher.startWindow()
+  await tick()
+  const initial = watcher.status().value.pendingRound
+  assert.equal(initial.retryAtMs, clock.now().getTime() + 120_000)
+  const ending = { ...row, msgId: 'new-context', t_msg: row.t_msg + 10, content: '话题已结束，不用再回复' }
+  transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [row, ending] } })
+  await clock.next()
+  assert.equal(watcher.status().value.pendingRound.count, 2)
+  assert.equal(watcher.status().value.pendingRound.retryAtMs, initial.retryAtMs)
+  while (clock.now().getTime() < initial.retryAtMs) await clock.next()
+  assert.equal(prompts.length, 2)
+  assert.match(prompts[1], /话题已结束/)
+  assert.deepEqual(watcher.status().value.pendingRound, pendingState())
+  await clock.next()
+  assert.equal(prompts.length, 2)
+  assert.equal(transport.sends.length, 0)
+})
+
+test('采集故障取消慢生成并保留批次，空采集恢复后重新生成，迟到草稿不发送', async t => {
+  let release, signal, calls = 0
+  const draft = { write: params => {
+    if (++calls > 1) return Promise.resolve({ ok: true, text: '新上下文的回复', finishReason: 'stop' })
+    signal = params.signal
+    return new Promise(resolve => { release = resolve })
+  } }
+  const { watcher, clock, transport } = autoFixture(t, { draft })
+  t.after(() => release?.({ ok: true, text: '迟到' }))
+  await watcher.startWindow()
+  await tick()
+  transport.search = async () => networkFailure
+  await clock.next()
+  assert.equal(signal.aborted, true)
+  const pending = watcher.status().value.pendingRound
+  assert.equal(pending.count, 1)
+  assert.equal(pending.retryKind, 'collection')
+  assert.equal(pending.retryAtMs, clock.now().getTime() + 40_000)
+  assert.equal(pending.inFlight, false)
+  transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [] } })
+  await clock.next()
+  assert.equal(calls, 2)
+  assert.deepEqual(transport.sends, [{ group: GROUP, text: '新上下文的回复' }])
+  release({ ok: true, text: '迟到旧草稿' })
+  await tick()
+  await clock.next()
+  assert.equal(transport.sends.length, 1)
+})
+
+test('模型退避中的旧消息移出最新上下文或已被自己回复时不补发', async t => {
+  for (const action of ['evicted', 'answered']) await t.test(action, async t => {
+    let writes = 0
+    const draft = { write: async () => { writes++; return { ok: false, retryable: true, errorCode: 'TRANSPORT', error: 'temporary' } } }
+    const { watcher, clock, store, transport, row } = autoFixture(t, { draft })
+    await watcher.startWindow()
+    await tick()
+    store.jsonl.set(`${DIR}/messages.jsonl`, action === 'evicted'
+      ? Array.from({ length: 50 }, (_, i) => ({ ...row, msgId: `later-${i}`, t_msg: row.t_msg + i + 1 }))
+      : [row, { ...row, msgId: 'our-answer', t_msg: row.t_msg + 1, from: 'u-self', content: '已回答' }])
+    transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [] } })
+    await clock.next()
+    assert.deepEqual(watcher.status().value.pendingRound, pendingState())
+    assert.equal(writes, 1)
+    assert.equal(transport.sends.length, 0)
+  })
+})
+
+test('模型退避在停止、静音、重开、换群、到期、卸载时清空，旧定时器不能补试', async t => {
+  for (const action of ['stop', 'mute', 'restart', 'group', 'expiry', 'dispose']) await t.test(action, async t => {
+    let writes = 0
+    const { watcher, clock, transport } = autoFixture(t, { draft: { write: async () => { writes++; return { ok: false, retryable: true, errorCode: 'TIMEOUT', error: 'temporary' } } } })
+    await watcher.startWindow({ hours: action === 'expiry' ? 0.001 : 1 })
+    await tick()
+    assert.equal(watcher.status().value.pendingRound.retryAttempt, 1)
+    const old = clock.jobs.at(-1)
+    if (action === 'stop' || action === 'group') await watcher.stop()
+    if (action === 'mute') await watcher.stop({ mode: 'mute' })
+    if (action === 'restart') await watcher.startWindow()
+    if (action === 'group') await watcher.updateConfig({ group: '7654321' })
+    if (action === 'expiry') await clock.next()
+    if (action === 'dispose') watcher.dispose()
+    old.fn()
+    await tick()
+    assert.deepEqual(watcher.status().value.pendingRound, pendingState())
+    assert.equal(writes, 1)
+    assert.equal(transport.sends.length, 0)
+  })
+})
+
+test('不可恢复的模型故障停监控，未知错误与长度截断不循环重试', async t => {
+  for (const code of ['AUTH', 'QUOTA_EXCEEDED', 'INVALID_REQUEST', 'MODEL_NOT_FOUND', 'UNKNOWN', 'MAX_TOKENS']) await t.test(code, async t => {
+    let calls = 0
+    const fatal = !['UNKNOWN', 'MAX_TOKENS'].includes(code)
+    const { watcher, clock, transport } = autoFixture(t, { draft: { write: async () => { calls++; return { ok: false, retryable: false, errorCode: code, error: code } } } })
+    await watcher.startWindow()
+    await tick()
+    assert.equal(watcher.status().value.window.stopped, fatal)
+    assert.equal(watcher.status().value.poll.running, !fatal)
+    assert.deepEqual(watcher.status().value.pendingRound, pendingState())
+    if (!fatal) await clock.next()
+    assert.equal(calls, 1)
+    assert.equal(transport.sends.length, 0)
+  })
+})
+
+test('进入发送后即使回执超时、未知或记账失败也不重放该批次', async t => {
+  for (const outcome of ['timeout', 'throw', 'unknown-ack', 'accounting']) await t.test(outcome, async t => {
+    const { watcher, clock, transport, store } = autoFixture(t)
+    let release, submitted = 0
+    transport.send = async () => { submitted++; return new Promise((resolve, reject) => { release = outcome === 'throw' ? () => reject(new Error('send timeout')) : resolve }) }
+    if (outcome === 'accounting') {
+      const write = store.writeJsonAtomic
+      store.writeJsonAtomic = (file, value) => file.endsWith('/state.json') && value.sentCount > 0 ? { ok: false, error: 'fixture disk full' } : write(file, value)
+    }
+    await watcher.startWindow()
+    await tick()
+    assert.equal(submitted, 1)
+    transport.search = async () => networkFailure
+    await clock.next()
+    release(outcome === 'timeout' ? { ok: false, kind: 'timeout', retryable: true, error: 'unknown receipt' }
+      : { ok: true, value: outcome === 'unknown-ack' ? { unrecognized: true, msgId: '' } : { msgId: 'sent-once' } })
+    await tick()
+    assert.equal(watcher.status().value.pendingRound.count, 0)
+    transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [] } })
+    if (outcome === 'accounting') {
+      assert.equal(watcher.status().value.persistence.ok, false)
+      assert.equal(watcher.status().value.poll.running, false)
+    } else { await clock.next(); await clock.next() }
+    assert.equal(submitted, 1)
+  })
+})
 
 test('自动轮次忙碌时合并去重，空采集补判待处理消息，SKIP 后不反复重判', async t => {
   const clock = pollingClock()
@@ -170,7 +352,7 @@ test('自动轮次忙碌时合并去重，空采集补判待处理消息，SKIP 
   incoming = [first, next, next, last]
   await clock.next()
   assert.equal(calls.length, 1, '忙碌期间不并行启动模型')
-  assert.deepEqual(watcher.status().value.pendingRound, { count: 2, retryAtMs: null })
+  assert.deepEqual(watcher.status().value.pendingRound, pendingState({ count: 3, inFlight: true }))
   release({ ok: true, text: 'SKIP' })
   await tick()
   await clock.next()
@@ -221,11 +403,11 @@ test('冷却期不启动模型，冷却结束后没有新消息也会补判且�
   await tick()
   assert.equal(draft.calls.length, 0)
   assert.equal(judge.rounds.length, 0)
-  assert.deepEqual(watcher.status().value.pendingRound, { count: 1, retryAtMs: now + 10_000 })
+  assert.deepEqual(watcher.status().value.pendingRound, pendingState({ count: 1, retryAtMs: now + 10_000, retryKind: 'cooldown' }))
   await clock.next()
   assert.equal(transport.sends.length, 1)
   assert.equal(draft.calls.length, 1)
-  assert.deepEqual(watcher.status().value.pendingRound, { count: 0, retryAtMs: null })
+  assert.deepEqual(watcher.status().value.pendingRound, pendingState())
   await clock.next()
   assert.equal(transport.sends.length, 1)
 })
@@ -253,8 +435,8 @@ test('最终发送守卫拒绝冷却时保留批次，补判会重新生成而�
   assert.deepEqual(transport.sends, [{ group: GROUP, text: '合成草稿2' }])
 })
 
-test('停止、静音、重开、换群、到期、采集故障与释放都会清空冷却中的旧批次', async t => {
-  for (const action of ['stop', 'mute', 'restart', 'group', 'expiry', 'failure', 'dispose', 'self']) await t.test(action, async t => {
+test('停止、静音、重开、换群、到期与释放都会清空冷却中的旧批次', async t => {
+  for (const action of ['stop', 'mute', 'restart', 'group', 'expiry', 'dispose', 'self']) await t.test(action, async t => {
     const clock = pollingClock()
     const now = clock.now().getTime()
     const row = { ...messages(1)[0], msgId: 'pending', t_msg: now - 1 }
@@ -271,17 +453,11 @@ test('停止、静音、重开、换群、到期、采集故障与释放都会�
     if (action === 'restart') await watcher.startWindow()
     if (action === 'group') { await watcher.stop(); await watcher.updateConfig({ group: '7654321' }) }
     if (action === 'dispose') watcher.dispose()
-    if (action === 'failure') { transport.search = async () => networkFailure; await clock.next() }
     if (action === 'self') {
       transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [row, { ...row, msgId: 'own-message', t_msg: now + 1, from: 'u-self' }] } })
     }
     if (['expiry', 'self', 'mute', 'restart'].includes(action)) await clock.next()
-    assert.deepEqual(watcher.status().value.pendingRound, { count: 0, retryAtMs: null })
-    if (action === 'failure') {
-      transport.search = async () => ({ ok: true, value: { uid: 'u-self', messages: [row] } })
-      await clock.next()
-      assert.equal(watcher.status().value.pendingRound.count, 0)
-    }
+    assert.deepEqual(watcher.status().value.pendingRound, pendingState())
     assert.equal(draft.calls.length, 0)
     assert.equal(transport.sends.length, 0)
   })
@@ -476,7 +652,7 @@ test('首轮网络故障返回正在重试；超时继续退避，成功清零�
   assert.equal(transport.sends.length, 0)
 })
 
-test('连续第五次网络故障停止并持久化；重建实例不会自动恢复', async (t) => {
+test('采集超过五次网络故障仍按 300 秒上限持续重试，恢复清零', async (t) => {
   const clock = pollingClock()
   const store = openWindow({ sentCount: 13 })
   const transport = transportStub()
@@ -485,32 +661,27 @@ test('连续第五次网络故障停止并持久化；重建实例不会自动�
   const watcher = makeWatcher({ store, transport, now: clock.now, schedule: clock.schedule })
   t.after(() => watcher.dispose())
   assert.equal((await watcher.startWindow()).recovering, true)
-  for (const delay of [40_000, 80_000, 160_000, 300_000]) {
+  for (const delay of [40_000, 80_000, 160_000, 300_000, 300_000, 300_000]) {
     assert.equal(clock.jobs.at(-1).ms, delay)
     await clock.next()
   }
   const status = watcher.status().value
-  assert.equal(searches, 5)
-  assert.equal(clock.jobs.length, 4)
-  assert.equal(status.poll.consecutiveFailures, 5)
-  assert.equal(status.poll.failureLimit, 5)
-  assert.equal(status.poll.running, false)
-  assert.equal(status.poll.recovering, false)
-  assert.equal(status.poll.nextRetryAt, null)
-  assert.equal(status.window.stopped, true)
-  assert.match(status.window.stoppedReason, /连续失败 5 次，已停止/)
-  assert.equal(status.window.collectionError, networkFailure.error)
+  assert.equal(searches, 7)
+  assert.equal(status.poll.consecutiveFailures, 7)
+  assert.equal(status.poll.failureLimit, null)
+  assert.equal(status.poll.running, true)
+  assert.equal(status.poll.recovering, true)
+  assert.equal(status.poll.nextRetryAt, clock.now().getTime() + 300_000)
+  assert.equal(status.window.stopped, false)
   assert.equal(status.sends.count, 13)
   assert.equal(transport.sends.length, 0)
-  const reloaded = makeWatcher({ store, transport, now: clock.now })
-  t.after(() => reloaded.dispose())
-  assert.equal((await reloaded.resume()).resumed, false)
-  assert.equal(reloaded.status().value.poll.consecutiveFailures, 0, '本次启动还没有新的采集失败')
-  assert.equal(reloaded.status().value.window.collectionFailures, 5, '历史失败次数仍保留')
-  assert.equal(reloaded.status().value.degraded.active, false)
-  assert.equal(reloaded.status().value.phase, 'idle')
-  assert.equal(reloaded.status().value.poll.recovering, false)
-  assert.equal(searches, 5)
+  transport.search = async () => ({ ok: true, value: { messages: [], uid: 'u-self' } })
+  await clock.next()
+  assert.equal(watcher.status().value.poll.consecutiveFailures, 0)
+  assert.equal(watcher.status().value.poll.recovering, false)
+  assert.equal(watcher.status().value.poll.nextRetryAt, null)
+  assert.equal(clock.jobs.at(-1).ms, 20_000)
+  assert.ok(store.text.get(`${DIR}/poll.log`).some(line => line.includes('poll recovered after 7 failures')))
 })
 
 test('重试期间的停止、卸载、到期阻止下一次请求；旧定时回调不能复活采集', async (t) => {

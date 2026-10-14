@@ -34,7 +34,7 @@
     import { defaultConfig, applyPatch } from '/config.js'
     const params = new URLSearchParams(location.search)
     const scenario = params.get('scenario') || 'default'
-    const replyScenarios = { 'reply-cooldown': '自动回复 / 等待冷却', 'reply-pending': '自动回复 / 合并待判', 'reply-skip': '自动回复 / SKIP', 'reply-failed': '自动回复 / 生成失败', 'reply-blocked': '自动回复 / 发送拒绝', 'llm-only': '自动回复 / 仅语言模型' }
+    const replyScenarios = { 'reply-cooldown': '自动回复 / 等待冷却', 'reply-pending': '自动回复 / 合并待判', 'reply-retry': '自动回复 / 模型重试', 'reply-inflight': '自动回复 / 重试请求中', 'reply-fatal': '自动回复 / 需要处理的错误', 'reply-skip': '自动回复 / SKIP', 'reply-failed': '自动回复 / 生成失败', 'reply-blocked': '自动回复 / 发送拒绝', 'llm-only': '自动回复 / 仅语言模型' }
     for (const [value, label] of Object.entries(replyScenarios)) document.getElementById('qa-scenario').add(new Option(label, value))
     for (const key of ['width', 'height', 'theme', 'zoom', 'scenario']) {
       const element = document.getElementById(`qa-${key}`)
@@ -89,7 +89,7 @@
     let mode = ['running', 'muted', 'stopped', 'expired', 'degraded', 'retrying', 'retry-stopped', 'historical-error'].includes(scenario) ? scenario : ['long-error', 'stale'].includes(scenario) ? 'running' : 'idle'
     if (diagnostics) mode = 'degraded'
     if (scenario === 'persistence-error') mode = 'stopped'
-    if (Object.hasOwn(replyScenarios, scenario)) mode = 'running'
+    if (Object.hasOwn(replyScenarios, scenario)) mode = scenario === 'reply-fatal' ? 'stopped' : 'running'
     let sentCount = scenario === 'long-error' ? 123456789 : scenario === 'historical-error' ? 13 : 10
     let statusReads = 0
     const calls = []
@@ -103,18 +103,22 @@
       const running = ['running', 'muted', 'degraded', 'retrying'].includes(mode)
       const stopped = ['muted', 'stopped', 'retry-stopped', 'historical-error'].includes(mode)
       const active = ['running', 'muted', 'degraded', 'stopped', 'retrying', 'retry-stopped', 'historical-error'].includes(mode)
+      const modelRetry = ['reply-retry', 'reply-inflight'].includes(scenario)
       return {
         phase: mode === 'degraded' || retrying || retryStopped ? 'degraded' : active && !stopped ? 'running' : 'idle',
         group: config.group, configState,
         persistence: scenario === 'persistence-error' ? { ok: false, error: '模拟记账失败，自动监控已暂停' } : { ok: true, error: null },
-        window: { active, stopped, stoppedAt: historical ? '2026-10-09 23:11:49' : null, collectionError: retryStopped || historical ? networkError : null, startedAt: mode === 'idle' ? null : '2026-10-08 10:00:00', endsAt: mode === 'idle' ? null : '2026-10-08 14:00:00', remainingSec: mode === 'expired' ? -60 : active ? 7200 : null },
-        poll: { running, recovering: retrying, failureLimit: 5, nextRetryAt: retrying ? nextRetryAt : null, intervalSec: config.intervalSec, lagSec: diagnostics ? 40544 : running ? 1 : null, updatedAt: historical ? '2026-10-09 23:11:24' : mode === 'idle' ? null : '2026-10-08 21:29:42', watchedMsgs: diagnostics ? 53 : mode === 'idle' ? null : 32, consecutiveFailures: retrying ? 2 : retryStopped ? 5 : ['long-error', 'diagnostics-long'].includes(scenario) ? 2 : 0, lastError: retrying || retryStopped ? networkError : ['long-error', 'diagnostics-long'].includes(scenario) ? longError : null },
+        window: { active, stopped, stoppedReason: scenario === 'reply-fatal' ? '模型不可恢复故障：模型服务认证或权限失败（AUTH）' : '', stoppedAt: historical ? '2026-10-09 23:11:49' : null, collectionError: retryStopped || historical ? networkError : null, startedAt: mode === 'idle' ? null : '2026-10-08 10:00:00', endsAt: mode === 'idle' ? null : '2026-10-08 14:00:00', remainingSec: mode === 'expired' ? -60 : active ? 7200 : null },
+        poll: { running, recovering: retrying, failureLimit: retryStopped ? 5 : null, nextRetryAt: retrying ? nextRetryAt : null, intervalSec: config.intervalSec, lagSec: diagnostics ? 40544 : running ? 1 : null, updatedAt: historical ? '2026-10-09 23:11:24' : mode === 'idle' ? null : '2026-10-08 21:29:42', watchedMsgs: diagnostics ? 53 : mode === 'idle' ? null : 32, consecutiveFailures: retrying ? 8 : retryStopped ? 5 : ['long-error', 'diagnostics-long'].includes(scenario) ? 2 : 0, lastError: retrying || retryStopped ? networkError : ['long-error', 'diagnostics-long'].includes(scenario) ? longError : null },
         selfUid: mode === 'idle' ? '' : diagnostics ? 'preview-account@corp.example.com' : 'preview-account',
         sends: { count: sentCount, lastSendAt: diagnostics ? '2026-10-09 21:54:17' : null, lastSendContent: diagnostics ? '模拟历史消息：用于检查卡片布局，不会发送。' : null },
         judge: config.judge, llm: { ...config.llm, resolved: config.llm.provider && config.llm.model
           ? { provider: config.llm.provider, model: config.llm.model, source: 'plugin' }
           : { ...defaultSelection, source: 'host' } }, dryRun: config.dryRun,
-        pendingRound: { count: scenario === 'reply-cooldown' ? 2 : scenario === 'reply-pending' ? 3 : 0, retryAtMs: scenario === 'reply-cooldown' ? Date.now() + 10000 : null },
+        pendingRound: { count: modelRetry || retrying ? 2 : scenario === 'reply-cooldown' ? 2 : scenario === 'reply-pending' ? 3 : 0,
+          retryAtMs: modelRetry || retrying ? nextRetryAt : scenario === 'reply-cooldown' ? Date.now() + 10000 : null,
+          retryKind: modelRetry ? 'model' : retrying ? 'collection' : scenario === 'reply-cooldown' ? 'cooldown' : null,
+          retryAttempt: modelRetry ? 7 : retrying ? 8 : 0, inFlight: scenario === 'reply-inflight', lastError: modelRetry ? '模型连接中断（TRANSPORT）' : null },
         round: ['reply-skip', 'reply-failed', 'reply-blocked'].includes(scenario) ? {
           at: '2026-10-13 12:00:00', verdict: scenario === 'reply-blocked' ? 'send-blocked' : 'quiet',
           reason: scenario === 'reply-skip' ? 'model said SKIP' : scenario === 'reply-failed' ? 'draft unavailable: 模型流未正常结束（缺少 finish/stop）' : 'draft: preview-model',

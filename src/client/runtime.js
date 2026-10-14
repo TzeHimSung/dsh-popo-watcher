@@ -19,10 +19,10 @@ export function runtimeView(snapshot) {
   const collectionError = value?.phase === 'disposed' || historicalCollectionError || persistenceError ? '' : win.collectionError || (poll.consecutiveFailures > 0
     ? (poll.lastError || value?.degraded?.reason || '采集失败')
     : value?.degraded?.active === true ? (value.degraded.reason || '采集失败') : '')
-  const failureLimit = poll.failureLimit ?? 5
+  const failureLimit = poll.failureLimit === null ? null : poll.failureLimit ?? 5
   const recovering = poll.running === true && poll.recovering === true && !(win.remainingSec <= 0 && win.remainingSec != null)
-  const limitReached = poll.running !== true && collectionError && poll.consecutiveFailures >= failureLimit
-  const collectionStatus = recovering ? `采集重试中（${poll.consecutiveFailures}/${failureLimit}）`
+  const limitReached = failureLimit !== null && poll.running !== true && collectionError && poll.consecutiveFailures >= failureLimit
+  const collectionStatus = recovering ? (failureLimit === null ? `采集重试中（已失败 ${poll.consecutiveFailures} 次）` : `采集重试中（${poll.consecutiveFailures}/${failureLimit}）`)
     : limitReached ? `连续失败 ${failureLimit} 次，已停止`
     : collectionError ? (poll.running === true ? '采集失败' : '采集失败，已停止')
     : poll.running === true ? '运行中' : poll.running === false ? (win.stopped === true ? '已停止' : '未运行') : '—'
@@ -67,16 +67,30 @@ export function generationModelText(llm) {
 }
 
 export function replyStatusText(value = {}) {
-  if (value.phase === 'disposed' || value.window?.stopped === true) return '自动回复已停止'
+  if (value.phase === 'disposed') return '自动回复已停止'
+  if (value.persistence?.ok === false) return `需要处理的错误：${value.persistence.error || '持久化失败'}；自动回复已停止。`
+  if (value.window?.stopped === true) return value.window.stoppedReason?.startsWith('模型不可恢复故障：')
+    ? `需要处理的错误：${value.window.stoppedReason}；自动回复已停止。` : '自动回复已停止'
   if (typeof value.window?.remainingSec === 'number' && value.window.remainingSec <= 0) return '自动回复窗口已到期'
   const pending = value.pendingRound
+  if (value.poll?.recovering === true || pending?.retryKind === 'collection') {
+    return `等待采集恢复：已失败 ${value.poll?.consecutiveFailures ?? pending?.retryAttempt ?? 0} 次；${pending?.count ?? 0} 条消息保留待判。`
+  }
   if (pending?.count > 0) {
+    if (pending.inFlight === true) return pending.retryKind === 'model'
+      ? `模型重试中：已失败 ${pending.retryAttempt} 次，正在重新判断 ${pending.count} 条消息。`
+      : `正在判断 ${pending.count} 条消息。`
+    if (pending.retryKind === 'model') {
+      const when = Number.isFinite(pending.retryAtMs) ? `最早 ${new Date(pending.retryAtMs).toLocaleString('zh-CN', { hour12: false })} 后` : '下一次'
+      return `模型重试中：已失败 ${pending.retryAttempt} 次；${pending.count} 条待判消息；${when}成功采集时重新判断。${pending.lastError ? ` ${pending.lastError}` : ''}`
+    }
     return Number.isFinite(pending.retryAtMs)
       ? `等待冷却：${pending.count} 条待判消息；最早 ${new Date(pending.retryAtMs).toLocaleString('zh-CN', { hour12: false })} 后成功采集时重新判断。`
       : `${pending.count} 条消息待判，将在下一次成功采集后处理。`
   }
   const round = value.round
   if (!round) return '等待新消息'
+  if (round.errorCode && !['ABORTED', 'MAX_TOKENS', 'OUTPUT_LIMIT'].includes(round.errorCode) && round.retryable !== true) return `需要处理的错误：${round.reason || round.errorCode}；本轮不重试。`
   if (round.verdict === 'send-blocked') return `发送被拒绝：${round.sendReason || round.reason || '发送条件未满足'}`
   if (round.verdict === 'cancelled') return '本轮已取消'
   if (round.reason === 'model said SKIP') return '模型选择不回复（SKIP）'

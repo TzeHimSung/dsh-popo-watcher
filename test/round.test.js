@@ -296,6 +296,29 @@ test('buildDraftPrompt：带 [新] 标记、我们说过的话、引导语与 SK
   assert.match(prompt, /只回 SKIP/)
 })
 
+test('生成提示保留当前账号身份，按账号而非同名识别自己的消息', async () => {
+  const rows = [
+    { ...messages()[0], from: 'u-self', name: '同名用户', content: '聊聊最近的 AI 工具吧。' },
+    { ...messages()[1], name: '同名用户', content: '哈哈，你觉得哪种功能最实用？' },
+  ]
+  for (const enabled of [false, true]) {
+    const writer = draftWriter()
+    await plan({ messages: rows, newMessageIds: ['m2'], draftWriter: writer, config: { judge: { enabled } } })
+    const prompt = writer.calls[0].prompt
+    assert.match(prompt, /当前账号的群内显示名：同名用户/)
+    assert.match(prompt, /1\. \[自己\] 同名用户：聊聊最近的 AI 工具吧。/)
+    assert.match(prompt, /2\. \[新\] 同名用户：哈哈，你觉得哪种功能最实用？/)
+    assert.doesNotMatch(prompt, /2\. \[新\] \[自己\]/)
+    assert.match(prompt, /自然接话/)
+    if (!enabled) assert.match(prompt, /优先简短回应.*不要求新增技术信息/)
+  }
+
+  const writer = draftWriter()
+  const longer = [rows[0], ...Array.from({ length: 15 }, (_, i) => ({ ...rows[1], msgId: `follow-${i}`, t_msg: 3000 + i }))]
+  await plan({ messages: longer, newMessageIds: ['follow-14'], draftWriter: writer, config: { judge: { enabled: false } } })
+  assert.match(writer.calls[0].prompt, /当前账号的群内显示名：同名用户/, '自己的消息不在最近 14 条内时仍保留已知身份')
+})
+
 test('plan 对坏输入（messages 非数组 / config 为空）也不抛', async () => {
   const runner = createRound({ judgeClient: judgeClient(), draftWriter: draftWriter() })
   for (const input of [undefined, {}, { messages: 'nope', config: null }, { messages: [null, undefined], newCount: 1 }]) {

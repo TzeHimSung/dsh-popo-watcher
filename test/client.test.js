@@ -534,6 +534,12 @@ test('自动回复状态区分冷却、待判、SKIP、生成失败和发送拒�
   const cases = [
     [{ pendingRound: { count: 2, retryAtMs: Date.parse('2026-10-13T12:01:00+08:00') } }, '等待冷却：2 条待判消息'],
     [{ pendingRound: { count: 3, retryAtMs: null } }, '3 条消息待判'],
+    [{ pendingRound: { count: 3, inFlight: true } }, '正在判断 3 条消息'],
+    [{ pendingRound: { count: 3, retryKind: 'model', retryAttempt: 7, retryAtMs: Date.parse('2026-10-14T00:40:00+08:00'), lastError: '模型连接中断' } }, '模型重试中：已失败 7 次'],
+    [{ pendingRound: { count: 2, retryKind: 'model', retryAttempt: 2, inFlight: true } }, '正在重新判断 2 条消息'],
+    [{ poll: { ...STATUS.poll, recovering: true, failureLimit: null, consecutiveFailures: 8 }, pendingRound: { count: 2, retryKind: 'collection' } }, '等待采集恢复：已失败 8 次；2 条消息保留待判'],
+    [{ round: { verdict: 'quiet', errorCode: 'UNKNOWN', retryable: false, reason: '未知模型错误' } }, '需要处理的错误：未知模型错误；本轮不重试'],
+    [{ window: { ...STATUS.window, stopped: true, stoppedReason: '模型不可恢复故障：认证失效' } }, '需要处理的错误：模型不可恢复故障：认证失效'],
     [{ round: { verdict: 'quiet', reason: 'model said SKIP' } }, '模型选择不回复（SKIP）'],
     [{ round: { verdict: 'quiet', reason: 'draft unavailable: 模型中断' } }, '生成失败：模型中断'],
     [{ round: { verdict: 'send-blocked', reason: 'draft: fixture', sendReason: 'too soon' } }, '发送被拒绝：too soon'],
@@ -546,6 +552,16 @@ test('自动回复状态区分冷却、待判、SKIP、生成失败和发送拒�
     assertTreeHas(summary, expected)
     harness.unmount()
   }
+})
+
+test('新采集快照无失败次数上限，超过五次仍显示自动重试', async t => {
+  const { harness } = await mountPage(t, savingConnection({ status: { ok: true, value: {
+    ...STATUS, poll: { ...STATUS.poll, recovering: true, failureLimit: null, consecutiveFailures: 8, nextRetryAt: Date.parse('2026-10-14T00:40:00+08:00'), lastError: '网络中断' },
+  } } }))
+  assertTreeHas(harness.tree(), '采集重试中（已失败 8 次）')
+  assertTreeHas(harness.tree(), '下次重试：')
+  assert.equal(byAction(harness.tree(), '停止').props['aria-checked'], true)
+  assert.doesNotMatch(JSON.stringify(harness.tree()), /8\/5|连续失败 5 次，已停止/)
 })
 
 test('停用 TypeSafe 时显示生成模型自行判断，设置和运行详情说明宿主上限', async t => {
