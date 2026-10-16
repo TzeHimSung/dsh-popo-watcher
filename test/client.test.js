@@ -1672,11 +1672,16 @@ test('流水卡：进入即拉群消息，其它记录按需读取，并把行�
   byTab(harness.tree(), 'records').props.onClick()
   await harness.flush()
   assert.deepEqual(connection.calls.find(([, method]) => method === 'messages'), [RPC_CHANNEL, 'messages', { limit: 30 }])
-  assertTreeHas(harness.tree(), '张三：缓存清了还是慢')
+  const record = () => findNodes(harness.tree(), node => node.props?.className === 'dsh-popo-line')[0]
+  assertTreeHas(record(), '张三')
+  assertTreeHas(record(), '2026-09-22 09:00:00')
+  assertTreeHas(record(), '缓存清了还是慢')
 
   byStream(harness.tree(), 'sends').props.onClick()
   await harness.flush()
-  assertTreeHas(harness.tree(), '[开场白] 大家好')
+  assertTreeHas(record(), '[开场白]')
+  assertTreeHas(record(), '2026-09-22 09:10:00')
+  assertTreeHas(record(), '大家好')
 
   byStream(harness.tree(), 'log').props.onClick()
   await harness.flush()

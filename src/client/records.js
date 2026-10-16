@@ -29,7 +29,8 @@ export function createRecords(React, { noteLine, useLifetime }) {
       const valid = Array.isArray(rows) && (next !== 'messages'
         || result.value?.group === group && typeof result.value?.fetchedAt === 'string' && result.value.fetchedAt !== '')
       if (!result.ok || !valid) {
-        setViews(previous => ({ ...previous, [next]: { ...previous[next], phase: 'error', note: { tone: 'bad', text: `读取失败：${result.ok ? '宿主未返回当前群的有效记录，请刷新或重新加载插件' : result.text}` } } }))
+        // 群或连接变化会清空视图；首次失败也必须保留完整的列表状态。
+        setViews(previous => ({ ...previous, [next]: { rows: [], at: null, ...previous[next], phase: 'error', note: { tone: 'bad', text: `读取失败：${result.ok ? '宿主未返回当前群的有效记录，请刷新或重新加载插件' : result.text}` } } }))
       } else {
         setViews(previous => ({ ...previous, [next]: { phase: 'ready', rows, at: next === 'messages' ? result.value.fetchedAt : new Date().toLocaleTimeString(), note: null } }))
       }
@@ -47,30 +48,37 @@ export function createRecords(React, { noteLine, useLifetime }) {
       }
     }, [connection, group, props.active, kind])
 
-    const lines = view.rows.map(row => kind === 'log'
-      ? String(row ?? '')
-      : kind === 'sends' ? `${row?.at ?? ''} ${row?.opening === true ? '[开场白] ' : ''}${row?.content ?? ''}`
-      : `${row?.time ?? ''} ${row?.name ?? row?.from ?? ''}：${row?.content ?? ''}`)
+    const lines = view.rows.map((row, index) => h('div', { className: 'dsh-popo-line', key: index }, kind === 'log'
+      ? h('span', { className: 'dsh-popo-record-log' }, String(row ?? ''))
+      : [
+        h('div', { className: 'dsh-popo-record-meta', key: 'meta' }, [
+          h('span', { className: 'dsh-popo-record-author' }, kind === 'messages' ? String(row?.name ?? row?.from ?? '') : row?.opening === true ? '[开场白]' : '已发送'),
+          h('time', null, String(kind === 'messages' ? row?.time ?? '' : row?.at ?? '')),
+        ]),
+        h('p', { className: 'dsh-popo-record-content', key: 'content' }, String(row?.content ?? '')),
+      ]))
     const empty = view.phase === 'initial' ? `尚未加载${labels[kind]}`
       : view.phase === 'loading' ? '正在读取…'
       : view.phase === 'error' ? '记录读取失败，可重试刷新。'
       : `暂无${labels[kind]}记录`
-    return h('section', { className: 'dsh-popo-card', 'aria-label': '最近记录' }, [
+    return h('section', { className: 'dsh-popo-card dsh-popo-section', 'aria-label': '最近记录' }, [
       h('div', { className: 'dsh-popo-head', key: 'head' }, [
         h('h3', { className: 'dsh-popo-title' }, '最近记录'),
-        h('button', { className: 'dsh-popo-btn', type: 'button', 'data-action': '刷新记录', disabled: busy, onClick: () => { void load(kind) } }, busy ? '读取中…' : '刷新'),
+        h('button', { className: 'dsh-popo-btn dsh-popo-btn-compact', type: 'button', 'data-action': '刷新记录', disabled: busy, onClick: () => { void load(kind) } }, busy ? '读取中…' : '刷新'),
       ]),
-      h('div', { className: 'dsh-popo-actions', 'aria-label': '记录类型', key: 'tabs' }, Object.entries(labels).map(([key, label]) => h('button', {
-        className: 'dsh-popo-btn', type: 'button', key, 'data-stream': key, 'aria-pressed': kind === key,
+      h('div', { className: 'dsh-popo-actions dsh-popo-record-filters', 'aria-label': '记录类型', key: 'tabs' }, Object.entries(labels).map(([key, label]) => h('button', {
+        className: 'dsh-popo-btn dsh-popo-btn-compact dsh-popo-filter', type: 'button', key, 'data-stream': key, 'aria-pressed': kind === key,
         disabled: busy, onClick: () => { void load(key) },
       }, label))),
-      h('p', { className: 'dsh-popo-note', key: 'at' }, kind === 'messages'
-        ? (view.at ? `最近 ${lines.length} 条 · 最近成功获取：${view.at}${view.phase === 'error' ? '（缓存结果，刷新失败）' : ''}` : '获取服务端最近 30 条')
-        : view.at ? `最近 ${lines.length} 条 · 最后成功加载 ${view.at}${view.phase === 'error' ? '（缓存结果）' : ''}` : '按需读取最近 30 条'),
-      kind === 'messages' ? h('p', { className: 'dsh-popo-note', key: 'latest' }, `最新消息：${view.rows[0]?.time || '—'} · 最新在前 · 每 20 秒自动刷新`) : null,
+      h('div', { className: 'dsh-popo-record-info', key: 'info' }, [
+        h('p', { className: 'dsh-popo-note', key: 'at' }, kind === 'messages'
+          ? (view.at ? `最近 ${lines.length} 条 · 最近成功获取：${view.at}${view.phase === 'error' ? '（缓存结果，刷新失败）' : ''}` : '获取服务端最近 30 条')
+          : view.at ? `最近 ${lines.length} 条 · 最后成功加载 ${view.at}${view.phase === 'error' ? '（缓存结果）' : ''}` : '按需读取最近 30 条'),
+        kind === 'messages' ? h('p', { className: 'dsh-popo-note', key: 'latest' }, `最新消息：${view.rows[0]?.time || '—'} · 最新在前 · 每 20 秒自动刷新`) : null,
+      ]),
       lines.length === 0
         ? h('p', { className: 'dsh-popo-note dsh-popo-empty', role: 'status', key: 'empty' }, empty)
-        : h('div', { className: 'dsh-popo-lines', key: 'lines', 'aria-busy': busy }, lines.map((line, index) => h('div', { className: 'dsh-popo-line', key: index }, line))),
+        : h('div', { className: 'dsh-popo-lines', key: 'lines', 'aria-busy': busy }, lines),
       noteLine(view.note),
     ])
   }

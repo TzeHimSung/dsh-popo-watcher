@@ -65,7 +65,7 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
       ]],
       ['activity', '最近活动', activity],
     ]
-    return h('details', { className: 'dsh-popo-details', 'aria-label': '运行详情与诊断' }, [
+    return h('details', { className: 'dsh-popo-details dsh-popo-section', 'aria-label': '运行详情与诊断' }, [
       h('summary', null, '运行详情与诊断'),
       h('div', { className: 'dsh-popo-card' }, [
         props.snapshot.phase === 'error' ? h('p', { className: 'dsh-popo-note', key: 'cache' }, '以下详情为缓存，可能已过期。') : null,
@@ -225,8 +225,8 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
       setBusy(null)
     }
 
-    return h('div', { className: 'dsh-popo-card' }, [
-      h('div', { className: 'dsh-popo-head', key: 'head' }, [
+    return h('div', { className: 'dsh-popo-controls' }, [
+      h('div', { className: 'dsh-popo-control-row', key: 'head' }, [
         h('div', { className: 'dsh-popo-monitor-heading', key: 'heading' }, [
           h('h3', { className: 'dsh-popo-title', key: 'title' }, '自动监控'),
           h('span', { className: 'dsh-popo-badge', 'data-tone': view.tone, key: 'badge', role: 'status' }, busy !== null ? `${busy}中…` : view.text),
@@ -250,26 +250,26 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
           h('span', { className: 'dsh-popo-sr', id: 'popo-monitor-state' }, `${switchState}。停止会同时停止采集和自动发言。`),
         ]),
       ]),
-      h('div', { className: 'dsh-popo-mention-control', key: 'mentions' }, [
-        h('div', { className: 'dsh-popo-head', key: 'head' }, [
-          h('span', { className: 'dsh-popo-k', id: 'popo-mention-label' }, '只回复 @ 我的消息'),
-          h('button', {
-            className: 'dsh-popo-switch', type: 'button', role: 'switch',
-            'aria-label': '只回复 @ 我的消息', 'aria-checked': mentionChecked, 'aria-busy': mentionBusy,
-            'aria-describedby': 'popo-mention-hint', 'data-action': '切换仅回复@我',
-            disabled: mentionDisabled,
-            onClick: event => {
-              if (mentionDisabled) return
-              rememberMentionFocus(event)
-              void props.onMentionChange(!mentionChecked)
-            },
-          }, h('span', { className: 'dsh-popo-switch-thumb', 'aria-hidden': true })),
+      h('div', { className: 'dsh-popo-control-row', key: 'mentions' }, [
+        h('div', { className: 'dsh-popo-control-copy', key: 'copy' }, [
+          h('span', { id: 'popo-mention-label' }, '只回复 @ 我的消息'),
+          h('p', { className: 'dsh-popo-note', id: 'popo-mention-hint', key: 'hint' }, mentionBusy ? '正在保存回复范围…'
+            : '仅直接 @ 我时考虑自动回复；单独 @所有人不触发。开场白和手动发送不受影响。'),
         ]),
-        h('p', { className: 'dsh-popo-note', id: 'popo-mention-hint', key: 'hint' }, mentionBusy ? '正在保存回复范围…'
-          : '仅直接 @ 我时考虑自动回复；单独 @所有人不触发。开场白和手动发送不受影响。'),
+        h('button', {
+          className: 'dsh-popo-switch', type: 'button', role: 'switch',
+          'aria-label': '只回复 @ 我的消息', 'aria-checked': mentionChecked, 'aria-busy': mentionBusy,
+          'aria-describedby': 'popo-mention-hint', 'data-action': '切换仅回复@我',
+          disabled: mentionDisabled,
+          onClick: event => {
+            if (mentionDisabled) return
+            rememberMentionFocus(event)
+            void props.onMentionChange(!mentionChecked)
+          },
+        }, h('span', { className: 'dsh-popo-switch-thumb', 'aria-hidden': true })),
         mentionSettings.note?.scope === 'mentions' && (mentionSettings.note.tone === 'bad' || mentionSettings.configState !== 'saved') ? noteLine(mentionSettings.note) : null,
         mentionSettings.configState === 'unsaved' ? h('button', {
-          className: 'dsh-popo-btn', type: 'button', 'data-action': '重试保存回复范围', disabled: mentionDisabled,
+          className: 'dsh-popo-btn dsh-popo-control-feedback', type: 'button', 'data-action': '重试保存回复范围', disabled: mentionDisabled,
           onClick: event => {
             if (mentionDisabled) return
             rememberMentionFocus(event)
@@ -277,12 +277,18 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
           },
         }, '重试保存') : null,
       ]),
-      h('div', { className: 'dsh-popo-duration', key: 'duration' }, [
-        h('label', { className: 'dsh-popo-hours', key: 'hours' }, [
-          h('span', { className: 'dsh-popo-k' }, '本次时长'),
+      h('div', { className: 'dsh-popo-control-row', key: 'duration' }, [
+        h('div', { className: 'dsh-popo-control-copy', key: 'copy' }, [
+          h('label', { htmlFor: 'popo-monitor-hours' }, '本次时长'),
+          h('p', { className: 'dsh-popo-note', id: 'popo-monitor-hours-hint' }, hint),
+          h('p', { className: 'dsh-popo-note dsh-popo-remaining', 'aria-label': '本轮时间', hidden: !monitoring && ['未开始', '已停止', '已到期'].includes(view.remaining) }, view.remaining),
+        ]),
+        h('div', { className: 'dsh-popo-hours', key: 'hours' }, [
           h('input', {
+            id: 'popo-monitor-hours',
             className: 'dsh-popo-input',
             'data-field': 'hours',
+            'aria-describedby': 'popo-monitor-hours-hint popo-monitor-hours-unit',
             type: 'number',
             min: '1',
             max: '720',
@@ -292,11 +298,9 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
             'aria-invalid': !validHours && hoursOverride !== null,
             onChange: (event) => setHours(String(event?.target?.value ?? '')),
           }),
-          h('span', { className: 'dsh-popo-k' }, '小时'),
+          h('span', { className: 'dsh-popo-k', id: 'popo-monitor-hours-unit' }, '小时'),
         ]),
-        h('p', { className: 'dsh-popo-note dsh-popo-remaining', 'aria-label': '本轮时间' }, view.remaining),
       ]),
-      h('p', { className: 'dsh-popo-note', key: 'tip' }, hint),
       duplicateCollectionError || (note?.recovering && !view.recovering) || (view.collectionError && note?.tone !== 'bad' && !note?.recovering) ? null : noteLine(note),
       blocked && !shouldStop ? h('p', { className: 'dsh-popo-note', key: 'blocked' }, blocked) : null,
       !validHours && hoursOverride !== null ? h('p', { className: 'dsh-popo-err', role: 'alert', key: 'invalid' }, '本次时长需在 1–720 小时之间。') : null,
@@ -370,31 +374,33 @@ export function createOverview(React, { noteLine, useLifetime, useActionFocus })
       if (typeof onDone === 'function') onDone()
     }
 
-    return h('section', { className: 'dsh-popo-card', 'aria-label': '手动发言' }, [
-      h('h3', { className: 'dsh-popo-title', key: 'title' }, '手动发言'),
+    return h('section', { className: 'dsh-popo-card dsh-popo-section', 'aria-label': '手动发言' }, [
+      h('div', { className: 'dsh-popo-head', key: 'head' }, h('h3', { className: 'dsh-popo-title' }, '手动发言')),
       blocked ? h('p', { className: 'dsh-popo-err', role: 'alert', key: 'blocked' }, blocked) : null,
-      h('label', { className: 'dsh-popo-field', key: 'text' }, [
-        h('span', { className: 'dsh-popo-sr' }, '消息内容'),
-        h('textarea', {
-          className: 'dsh-popo-input dsh-popo-manual-text',
-          'data-field': 'manual-text',
-          rows: 3,
-          placeholder: '输入要发送的内容…',
-          value: text,
-          disabled: busy,
-          onChange: (event) => setText(String(event?.target?.value ?? '')),
-        }),
-      ]),
-      h('div', { className: 'dsh-popo-sendbar', key: 'actions' }, [
-        h('p', { className: 'dsh-popo-note', key: 'reason' }, '手动内容直接发送，不受自动规则或演练模式影响。'),
-        h('button', {
-          className: 'dsh-popo-btn',
-          type: 'button',
-          'data-action': '发送',
-          'data-primary': true,
-          disabled: busy === true || text.trim() === '' || Boolean(blocked),
-          onClick: () => { void send() },
-        }, busy === true ? '发送中…' : '发送'),
+      h('div', { className: 'dsh-popo-composer', key: 'composer' }, [
+        h('label', { className: 'dsh-popo-field', key: 'text' }, [
+          h('span', { className: 'dsh-popo-sr' }, '消息内容'),
+          h('textarea', {
+            className: 'dsh-popo-input dsh-popo-manual-text',
+            'data-field': 'manual-text',
+            rows: 3,
+            placeholder: '输入要发送的内容…',
+            value: text,
+            disabled: busy,
+            onChange: (event) => setText(String(event?.target?.value ?? '')),
+          }),
+        ]),
+        h('div', { className: 'dsh-popo-sendbar', key: 'actions' }, [
+          h('p', { className: 'dsh-popo-note', key: 'reason' }, '手动内容直接发送，不受自动规则或演练模式影响。'),
+          h('button', {
+            className: 'dsh-popo-btn',
+            type: 'button',
+            'data-action': '发送',
+            'data-primary': true,
+            disabled: busy === true || text.trim() === '' || Boolean(blocked),
+            onClick: () => { void send() },
+          }, busy === true ? '发送中…' : '发送'),
+        ]),
       ]),
       noteLine(note),
     ])

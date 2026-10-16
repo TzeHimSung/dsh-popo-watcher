@@ -50,7 +50,7 @@ export function createSettings(React, { noteLine, useLifetime, useActionFocus })
         ...rows,
       ])
     }
-    return h('section', { className: 'dsh-popo-card', 'aria-label': '监控与自动发送设置' }, [
+    return h('section', { className: 'dsh-popo-card dsh-popo-section', 'aria-label': '监控与自动发送设置' }, [
       h('div', { className: 'dsh-popo-head', key: 'head' }, [
         h('h3', { className: 'dsh-popo-title' }, '监控与自动发送'),
         h('span', { className: 'dsh-popo-note' }, configLabel(state, props.dirty)),
@@ -119,10 +119,10 @@ export function createSettings(React, { noteLine, useLifetime, useActionFocus })
         if (model) { props.onGenerationChange(provider.id, model.id); return }
       }
     }
-    return h('section', { className: 'dsh-popo-card', 'aria-label': '模型设置' }, [
+    return h('section', { className: 'dsh-popo-card dsh-popo-section', 'aria-label': '模型设置' }, [
       h('div', { className: 'dsh-popo-head', key: 'head' }, [
         h('h3', { className: 'dsh-popo-title' }, '模型设置'),
-        h('button', { className: 'dsh-popo-btn', type: 'button', 'data-action': '刷新模型列表', disabled: loading || state.busy,
+        h('button', { className: 'dsh-popo-btn dsh-popo-btn-compact', type: 'button', 'data-action': '刷新模型列表', disabled: loading || state.busy,
           onClick: () => { if (!loading && !state.busy) props.onRefresh() } }, loading ? '读取模型中…' : '刷新模型列表'),
       ]),
       h('div', { className: 'dsh-popo-form', key: 'fields' }, [

@@ -28,7 +28,7 @@ export function createUi(React) {
     render() {
       if (this.state.message !== null) {
         return h('div', { className: 'dsh-popo-root' }, [
-          h('div', { className: 'dsh-popo-card', key: 'card' }, [
+          h('div', { className: 'dsh-popo-card dsh-popo-section', key: 'card' }, [
             h('div', { className: 'dsh-popo-head', key: 'head' }, [
               h('span', { className: 'dsh-popo-title', key: 'title' }, SECTION_LABEL),
               h('span', { className: 'dsh-popo-badge', 'data-tone': 'bad', key: 'badge' }, '页面异常'),
@@ -70,7 +70,7 @@ export function createUi(React) {
         onClick: () => setTab(id), onKeyDown: event => navigate(event, index),
       }, `${label}${id === 'settings' && (dirty || hasUnpersisted) ? ' · 未保存' : ''}`))),
       h('section', { className: 'dsh-popo-panel', id: 'popo-panel-overview', role: 'tabpanel', 'aria-labelledby': 'popo-tab-overview', hidden: tab !== 'overview', key: 'overview' }, [
-        h('section', { className: 'dsh-popo-monitor', 'aria-label': '自动监控', key: 'monitor' }, [
+        h('section', { className: 'dsh-popo-card dsh-popo-section dsh-popo-monitor', 'aria-label': '自动监控', key: 'monitor' }, [
           h(Controls, { key: 'controls', connection, onDone: done, snapshot, view, blocked, defaultHours: settings.baseline?.windowHours, openingEnabled: settings.baseline?.opening?.enabled === true, configState: settings.configState, settings, onMentionChange: saveConfig }),
           h(StatusCard, { key: 'status', snapshot, view, onRefresh: done }),
         ]),
@@ -91,7 +91,7 @@ export function createUi(React) {
             ? (savedNote.tone === 'warn' ? '已保存（有提示）' : '✓ 配置已保存')
             : configLabel(settings, dirty)),
           h('div', { className: 'dsh-popo-actions' }, [
-            h('button', { className: 'dsh-popo-btn', type: 'button', 'data-action': '撤销修改', disabled: !dirty || settings.busy || settings.phase !== 'ready', onClick: () => setSettings(previous => ({ ...previous, draft: draftOf(previous.baseline), note: null })) }, '撤销修改'),
+            h('button', { className: 'dsh-popo-btn', type: 'button', 'data-quiet': true, 'data-action': '撤销修改', disabled: !dirty || settings.busy || settings.phase !== 'ready', onClick: () => setSettings(previous => ({ ...previous, draft: draftOf(previous.baseline), note: null })) }, '撤销修改'),
             h('button', { className: 'dsh-popo-btn', type: 'button', 'data-action': '保存', 'data-primary': true, disabled: !canSave, onClick: () => { void saveConfig() } }, settings.busy ? '保存中…' : hasUnpersisted ? '重试保存' : settings.configState === 'default' && !dirty ? '保存默认配置' : '保存配置'),
           ]),
           configChangedWhileLocked ? h('p', { className: 'dsh-popo-err', key: 'locked' }, '群或间隔有未保存修改，请先停止监控再保存。') : null,
