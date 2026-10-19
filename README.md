@@ -35,7 +35,7 @@ Mention filtering combines the official `atMembers` search with an explicit `@cu
 
 | Dependency | Purpose |
 | --- | --- |
-| DSH **0.2.x** | Runtime, model service, RPC, and UI. Compatibility baseline: Desktop **0.2.0-rc.2**. The `@deepseek-ai/dsh-tools` peer range is `^0.2.0-rc.2`, excluding 0.1 and 0.3. |
+| DSH **0.2.x** | Runtime, model service, RPC, and UI. Compatibility baseline: Desktop **0.2.1-rc.2**. The `@deepseek-ai/dsh-tools` peer range is `^0.2.1-rc.2`, excluding older releases and 0.3. |
 | `@deepseek-ai/cordis` **^4.0.2** | Host plugin framework, supplied by DSH. |
 | Official POPO CLI (`@popo/cli`) | Authenticated message search and sending. Obtain it through your organization's CLI distribution instructions and use an account with access to the target group. |
 | [TypeSafe](https://typesafe.ai/) API key | Optional conversation and draft judgment; required only when TypeSafe is enabled. Default model: `jev-latest`. |
@@ -66,10 +66,11 @@ cd dsh-popo-watcher
 
 $dshCli = 'C:\path\to\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
 & $dshCli --version
-& $dshCli plugin --profile desktop add (Get-Location).Path
+$package = (npm pack --json --ignore-scripts | ConvertFrom-Json)[0].filename
+& $dshCli plugin --profile desktop add (Join-Path (Get-Location).Path $package)
 ```
 
-Restart DSH Desktop, then open **Settings → POPO自动水群**. Use Desktop's bundled CLI so installation targets its `desktop` profile and runtime.
+Restart DSH Desktop, then open **Settings → POPO自动水群**. Use Desktop's bundled CLI so installation targets its `desktop` profile and runtime. Install the archive to keep the source checkout separate from Desktop's installation and cleanup paths. The committed client bundle is included; rebuild it first if you edit client source.
 
 ### Linux: DSH web profile
 
@@ -114,7 +115,7 @@ The repository uses synthetic test identities and fixtures. Credentials, runtime
 
 ## Update or uninstall
 
-For a linked checkout, run `git pull --ff-only`, then restart DSH and reopen settings. Rebuild first if you edit client source.
+For the Desktop archive installation, run `git pull --ff-only`, then repeat the packaging and installation commands above and restart DSH. For a linked web checkout, pull and restart. Rebuild first if you edit client source. Version 0.1.4 replaces the obsolete `webRuntime` Connection dependency with `webStartup`; it requires DSH 0.2.1-rc.2 or later in the 0.2 series.
 
 ```powershell
 # Windows Desktop, using $dshCli from above

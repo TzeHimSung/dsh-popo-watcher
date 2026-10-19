@@ -148,7 +148,7 @@ test('本机 DSH：完整插件在真实 Cordis/Connection 中提供当前 RPC �
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0, compression: 'none' })
   const registered = []
   await ctx.plugin({ name: 'offline-services', inject: ['webServer'], apply(owner) {
-    owner.provide('webRuntime', {})
+    owner.provide('webStartup', {})
     owner.provide('tools', { register: definition => registered.push(definition) })
   } })
   await ctx.plugin({ name: 'connection', inject: entries.find(entry => entry.id === 'connection').inject,
@@ -158,7 +158,7 @@ test('本机 DSH：完整插件在真实 Cordis/Connection 中提供当前 RPC �
   await Promise.all([...ctx.registry.values()].flatMap(entry => [...entry.fibers].map(fiber => fiber.await())))
   const ping = await registered.find(tool => tool.name === 'popo_watcher_ping').execute({ message: 'offline acceptance' })
   assert.equal(ping.ok, true)
-  assert.equal(ping.version, '0.1.3')
+  assert.equal(ping.version, '0.1.4')
   const response = await new Promise((resolve, reject) => {
     const req = request(`http://127.0.0.1:${ctx.get('webServer').port}${CHANNEL}/status`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -224,6 +224,14 @@ test('本机 DSH：独立服务上下文下，bundle 能挂载设置页的 HTTP 
   ])
   const connectionEntry = entries.find((entry) => entry.id === 'connection')
   assert.ok(connectionEntry, '必须使用本机 Web profile 的 Connection 声明')
+  const hostEntries = boot.composeEntries([
+    boot.loadOverlayPatches('dsh', join(packageDir('dsh-web-app'), 'cordis.patch.yml')),
+  ])
+  const hostConnectionEntry = hostEntries.find(entry => entry.id === 'connection')
+  for (const dependency of hostConnectionEntry.inject ?? []) {
+    assert.ok(connectionEntry.inject?.includes(dependency),
+      `插件必须保留宿主 Connection 的 ${dependency} 依赖`)
+  }
 
   const ctx = new Context()
   t.after(() => ctx.fiber.dispose())
@@ -231,7 +239,7 @@ test('本机 DSH：独立服务上下文下，bundle 能挂载设置页的 HTTP 
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0, compression: 'none' })
   await ctx.plugin({
     name: 'web-runtime', inject: ['webServer'],
-    apply(owner) { owner.provide('webRuntime', {}) },
+    apply(owner) { owner.provide('webStartup', {}) },
   })
   await ctx.plugin({
     name: 'connection', inject: connectionEntry.inject,

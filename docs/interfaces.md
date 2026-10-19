@@ -1,4 +1,4 @@
-# 模块接口约定（0.1.3）
+# 模块接口约定（0.1.4）
 
 本文件是 `lib/` 下各模块之间的**契约**。任何实现都必须先满足这里的签名与纪律；改契约要先改本文件（由 Lead 维护）。
 
@@ -242,7 +242,7 @@ export function createRpcHandler({ watcher, judge }): (endpoint: string, payload
 export function registerRpc(ctx, handler): void     // ctx.inject(['connection', 'webServer'], …)；等待连接和 HTTP 服务均就绪
 ```
 
-DSH 0.2.0-rc.2 的 `connection.rpc.handle(channel, handler)` 会立即访问 `webServer`，Cordis 会检查 Connection 提供者上下文的依赖声明。`cordis.patch.yml` 为宿主 `connection` 行补充 `webServer` 依赖，保留原有 `webRuntime`；插件自身也同时惰性等待两个服务。非 Web 组合没有 `connection` 行时不新增该行，RPC 保持等待，不影响宿主插件激活。
+兼容基准为 DSH 0.2.1-rc.2。`cordis.patch.yml` 保留宿主 `connection` 行的 `webStartup` 依赖，并补齐 RPC 注册需要的 `webServer`。旧版补丁中的 `webRuntime` 服务在新版中已不存在，保留它会阻止 Connection 激活并导致宿主启动失败。插件自身惰性等待 `connection` 和 `webServer` 后注册 RPC；非 Web 组合没有 `connection` 行时不新增该行，RPC 保持等待，不影响宿主插件激活。
 
 RPC 结果信封：`{ ok:true, value }` / `{ ok:false, error:{ code, message, details } }`；统一错误码为 `popo-watcher/error`，`details` 默认 `{}`。三个错误字段均为宿主 Connection 必需；缺少 `code` 或 `details` 会让浏览器报 `invalid server-response failure`，遮住真实原因。`status` 的内部失败也通过同一错误信封转换。
 

@@ -35,7 +35,7 @@
 
 | 依赖 | 用途 |
 | --- | --- |
-| DSH **0.2.x** | 提供运行时、模型服务、RPC 和界面。兼容基准为 Desktop **0.2.0-rc.2**；`@deepseek-ai/dsh-tools` 的 peer 范围为 `^0.2.0-rc.2`，不包含 0.1 和 0.3。 |
+| DSH **0.2.x** | 提供运行时、模型服务、RPC 和界面。兼容基准为 Desktop **0.2.1-rc.2**；`@deepseek-ai/dsh-tools` 的 peer 范围为 `^0.2.1-rc.2`，不包含更早版本及 0.3。 |
 | `@deepseek-ai/cordis` **^4.0.2** | 由 DSH 提供的插件框架。 |
 | 官方 POPO CLI（`@popo/cli`） | 完成认证、群消息搜索与发送。按所在组织提供的 CLI 安装方式获取，并使用能访问目标群的账号登录。 |
 | [TypeSafe](https://typesafe.ai/) API key | 可选的会话和草稿判读，仅启用 TypeSafe 时需要；默认模型为 `jev-latest`。 |
@@ -66,10 +66,11 @@ cd dsh-popo-watcher
 
 $dshCli = 'C:\path\to\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
 & $dshCli --version
-& $dshCli plugin --profile desktop add (Get-Location).Path
+$package = (npm pack --json --ignore-scripts | ConvertFrom-Json)[0].filename
+& $dshCli plugin --profile desktop add (Join-Path (Get-Location).Path $package)
 ```
 
-重新启动 DSH Desktop，进入 **设置 → POPO自动水群**。使用 Desktop 自带的 CLI，使安装目标与其 `desktop` profile 和运行时一致。
+重新启动 DSH Desktop，进入 **设置 → POPO自动水群**。使用 Desktop 自带的 CLI，使安装目标与其 `desktop` profile 和运行时一致。安装打包文件，使源码目录与 Desktop 的安装及清理路径分开；打包文件包含已提交的客户端产物，修改客户端源码后应先重新构建。
 
 ### Linux：DSH web profile
 
@@ -114,7 +115,7 @@ secret.json                  # 仅在界面保存 key 时生成
 
 ## 更新与卸载
 
-链接安装的源码副本执行 `git pull --ff-only` 后，重新启动 DSH 并打开设置页。修改客户端源码后，需要先重新构建。
+Desktop 使用打包文件安装时，执行 `git pull --ff-only` 后重复上面的打包和安装命令，再重新启动 DSH。链接安装的 web 源码副本更新后重启即可。修改客户端源码后，需要先重新构建。0.1.4 将过时的 Connection 依赖 `webRuntime` 改为 `webStartup`，要求使用 0.2 系列中的 DSH 0.2.1-rc.2 或更新版本。
 
 ```powershell
 # Windows Desktop，使用前文定义的 $dshCli
